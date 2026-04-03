@@ -462,7 +462,7 @@ with left:
 
     # 02 Gender
     st.markdown('<div class="pf-card"><div class="pf-card-title">// 02 — GENDER</div>', unsafe_allow_html=True)
-    gender = st.radio("", ["Male", "Female", "Non-binary"], horizontal=True, label_visibility="collapsed")
+    gender = st.radio("Gender", ["Male", "Female", "Non-binary"], horizontal=True, label_visibility="collapsed")
     st.markdown('</div>', unsafe_allow_html=True)
 
     # 03 Mode
@@ -488,7 +488,7 @@ with left:
 
     # 05 Style hint
     st.markdown('<div class="pf-card"><div class="pf-card-title">// 05 — STYLE HINT (OPTIONAL)</div>', unsafe_allow_html=True)
-    hint = st.text_area("", placeholder="e.g. dark fire mage with glowing eyes, carries a tome...",
+    hint = st.text_area("Style Hint", placeholder="e.g. dark fire mage with glowing eyes, carries a tome...",
                         height=70, label_visibility="collapsed")
     st.markdown('</div>', unsafe_allow_html=True)
 
