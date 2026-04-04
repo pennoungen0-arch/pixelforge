@@ -426,17 +426,29 @@ def make_placeholder(size, primary, secondary, living_type="Human"):
     result = Image.alpha_composite(final, img)
     return result.resize((size, size), Image.NEAREST)
 def remove_bg(img: Image.Image) -> Image.Image:
-    """Use rembg neural network for clean background removal."""
+    """
+    Remove background using rembg (best) with flood-fill fallback.
+    rembg uses U2Net neural net trained specifically for subject extraction.
+    """
+    # Try rembg first — it handles complex backgrounds properly
     try:
-        from rembg import remove as rembg_remove
+        from rembg import remove as rembg_remove, new_session
+        session = new_session("u2net")
         buf_in = io.BytesIO()
         img.convert("RGBA").save(buf_in, format="PNG")
-        buf_in.seek(0)
-        result = rembg_remove(buf_in.read())
-        return Image.open(io.BytesIO(result)).convert("RGBA")
+        result = rembg_remove(buf_in.getvalue(), session=session,
+                              alpha_matting=True,
+                              alpha_matting_foreground_threshold=240,
+                              alpha_matting_background_threshold=10)
+        out = Image.open(io.BytesIO(result)).convert("RGBA")
+        import numpy as np
+        # Only accept if at least 3% pixels are visible (not over-removed)
+        if (np.array(out)[:,:,3] > 10).sum() > (img.width * img.height * 0.03):
+            return out
     except Exception:
         pass
-    # Fallback: flood fill from edges
+
+    # Flood-fill fallback — only removes clearly uniform bg colors
     import numpy as np
     img  = img.convert("RGBA")
     arr  = np.array(img, dtype=np.int32)
@@ -444,13 +456,18 @@ def remove_bg(img: Image.Image) -> Image.Image:
     h, w = rv.shape
     bg   = np.zeros((h, w), dtype=bool)
     vis  = np.zeros((h, w), dtype=bool)
+
+    # Sample corner colors to detect the actual bg color
+    corners = [(0,0),(0,w-1),(h-1,0),(h-1,w-1)]
+    bg_samples = [(int(rv[y,x]),int(gv[y,x]),int(bv[y,x])) for y,x in corners]
+    avg_bg = tuple(sum(c[i] for c in bg_samples)//4 for i in range(3))
+
     def is_bg(py, px):
         pr,pg,pb = int(rv[py,px]),int(gv[py,px]),int(bv[py,px])
-        br = (pr+pg+pb)//3
-        if br>210 and abs(pr-pg)<20 and abs(pg-pb)<20: return True
-        if pb>150 and pg>140 and pr<160 and pb>pr+30:  return True
-        if pr>200 and pg>185 and pb>160 and br>190:    return True
-        return False
+        # Only remove pixels close to the detected bg color
+        diff = abs(pr-avg_bg[0]) + abs(pg-avg_bg[1]) + abs(pb-avg_bg[2])
+        return diff < 60  # tight threshold
+
     stack = ([(0,x) for x in range(w)]+[(h-1,x) for x in range(w)]+
              [(y,0) for y in range(h)]+[(y,w-1) for y in range(h)])
     while stack:
@@ -466,22 +483,76 @@ def remove_bg(img: Image.Image) -> Image.Image:
 
 
 def fetch_frame(prompt: str, size: int) -> Image.Image | None:
-    """Fetch one frame from Pollinations + remove background."""
+    """
+    Fetch one sprite frame. Tries multiple sources in order:
+    1. Hugging Face - stabilityai/stable-diffusion-2 (good at following prompts)
+    2. Pollinations with aggressive rembg removal
+    3. None (caller uses placeholder)
+    """
     import urllib.parse
-    encoded = urllib.parse.quote(prompt)
-    url = (f"https://image.pollinations.ai/prompt/{encoded}"
-           f"?width=512&height=512&nologo=true&model=flux&enhance=false")
-    try:
-        r = requests.get(url, timeout=90)
-        if r.status_code == 200 and "image" in r.headers.get("content-type",""):
-            img = Image.open(io.BytesIO(r.content)).convert("RGBA")
-            img = remove_bg(img)
-            import numpy as np
-            if (np.array(img)[:,:,3] > 10).sum() < 200:
-                return None
-            return img.resize((size, size), Image.NEAREST)
-    except Exception:
-        pass
+    import numpy as np
+
+    # ── Option 1: HuggingFace Inference API ──────────────────────────────────
+    # Works well with white background prompts and produces cleaner sprites
+    hf_prompt = (
+        f"pixel art sprite, {prompt}, "
+        f"white background, isolated character, no environment, no scenery, "
+        f"SNES style, 16-bit, clean outlines"
+    )
+    neg_prompt = "background, scenery, environment, sky, ground, trees, buildings, realistic, 3d, blurry"
+
+    hf_models = [
+        "stabilityai/stable-diffusion-2",
+        "stabilityai/stable-diffusion-xl-base-1.0",
+    ]
+    hf_headers = {"Authorization": f"Bearer {HF_KEY}"} if HF_KEY else {}
+
+    for model in hf_models:
+        try:
+            r = requests.post(
+                f"https://api-inference.huggingface.co/models/{model}",
+                headers=hf_headers,
+                json={
+                    "inputs": hf_prompt,
+                    "parameters": {
+                        "negative_prompt": neg_prompt,
+                        "width": 512, "height": 512,
+                        "num_inference_steps": 20,
+                        "guidance_scale": 7.5,
+                    }
+                },
+                timeout=60,
+            )
+            if r.status_code == 200 and "image" in r.headers.get("content-type", ""):
+                img = Image.open(io.BytesIO(r.content)).convert("RGBA")
+                img = remove_bg(img)
+                visible = (np.array(img)[:,:,3] > 10).sum()
+                if visible > 500:
+                    return img.resize((size, size), Image.NEAREST)
+        except Exception:
+            continue
+
+    # ── Option 2: Pollinations ────────────────────────────────────────────────
+    poll_prompt = (
+        f"pixel art 16-bit RPG character sprite, {prompt}, "
+        f"SNES Chrono Trigger style, black outlines, flat shading, "
+        f"plain white background, character only"
+    )
+    encoded = urllib.parse.quote(poll_prompt)
+    for model in ["flux", "turbo"]:
+        url = (f"https://image.pollinations.ai/prompt/{encoded}"
+               f"?width=512&height=512&nologo=true&model={model}&enhance=false")
+        try:
+            r = requests.get(url, timeout=90)
+            if r.status_code == 200 and "image" in r.headers.get("content-type", ""):
+                img = Image.open(io.BytesIO(r.content)).convert("RGBA")
+                img = remove_bg(img)
+                visible = (np.array(img)[:,:,3] > 10).sum()
+                if visible > 500:
+                    return img.resize((size, size), Image.NEAREST)
+        except Exception:
+            continue
+
     return None
 
 
