@@ -464,25 +464,161 @@ def remove_white_bg(img: Image.Image, threshold=240) -> Image.Image:
     img.putdata(new_data)
     return img
 
+def animate_frame(base_img, anim, frame_idx, total_frames):
+    """
+    Return a new PIL Image with pixel-art animation applied to the base sprite.
+    Works by manipulating pixel regions to simulate limb movement.
+    """
+    sz  = base_img.width
+    img = base_img.copy()
+    d   = ImageDraw.Draw(img)
+    t   = frame_idx / max(total_frames - 1, 1)   # 0.0 → 1.0
+    u   = max(1, sz // 16)                         # base unit
+
+    # Key body region boundaries (approximate, matches make_placeholder)
+    head_top   = sz // 10
+    head_h     = sz // 5
+    body_top   = head_top + head_h + max(1, sz // 32)
+    body_h     = sz // 3
+    leg_top    = body_top + body_h
+    leg_h      = sz // 4
+    cx         = sz // 2
+
+    # Helper: shift a horizontal band of pixels vertically by dy
+    def shift_band(y_start, y_end, dx=0, dy=0):
+        if dy == 0 and dx == 0:
+            return
+        band = img.crop((0, y_start, sz, y_end))
+        # Clear original area
+        d.rectangle([0, y_start, sz, y_end], fill=(0, 0, 0, 0))
+        img.paste(band, (dx, y_start + dy), band)
+
+    # Helper: shift left or right half
+    def shift_half(y_start, y_end, side, dx=0, dy=0):
+        if side == "left":
+            band = img.crop((0, y_start, cx, y_end))
+            d.rectangle([0, y_start, cx, y_end], fill=(0, 0, 0, 0))
+            img.paste(band, (dx, y_start + dy), band)
+        else:
+            band = img.crop((cx, y_start, sz, y_end))
+            d.rectangle([cx, y_start, sz, y_end], fill=(0, 0, 0, 0))
+            img.paste(band, (cx + dx, y_start + dy), band)
+
+    import math
+    sin_t = math.sin(t * math.pi * 2)   # full sine wave over animation
+    cos_t = math.cos(t * math.pi * 2)
+
+    if anim == "idle":
+        # Gentle bob — whole body shifts up/down by 1px on even frames
+        bob = 1 if frame_idx % 2 == 0 else 0
+        shift_band(head_top, sz, dy=bob)
+
+    elif anim in ("walk", "run"):
+        speed  = 2 if anim == "run" else 1
+        # Legs alternate: left leg forward, right leg back
+        leg_swing = int(sin_t * u * speed)
+        # Left leg
+        shift_half(leg_top, leg_top + leg_h, "left", dy=max(-u, min(u, leg_swing)))
+        # Right leg (opposite phase)
+        shift_half(leg_top, leg_top + leg_h, "right", dy=max(-u, min(u, -leg_swing)))
+        # Body slight lean
+        body_shift = int(sin_t * (u // 2) * speed)
+        shift_band(body_top, leg_top, dy=body_shift)
+        # Arms swing opposite to legs
+        # Left arm shifts down when left leg goes forward
+        shift_half(body_top, body_top + body_h // 2, "left", dy=-leg_swing)
+        shift_half(body_top, body_top + body_h // 2, "right", dy=leg_swing)
+        # Head bob
+        head_bob = abs(int(sin_t * u // 2))
+        shift_band(head_top, body_top, dy=head_bob)
+
+    elif anim == "jump":
+        # Phases: crouch → rise → peak → fall → land
+        if frame_idx < total_frames // 4:
+            # Crouch: compress legs
+            crouch = u
+            shift_band(leg_top, leg_top + leg_h, dy=-crouch)
+            shift_band(body_top, leg_top, dy=crouch // 2)
+        elif frame_idx < total_frames * 3 // 4:
+            # Rise / peak: whole body goes up, legs tuck
+            rise = int((frame_idx - total_frames // 4) / (total_frames // 2) * u * 3)
+            shift_band(head_top, sz, dy=-rise)
+            # Tuck legs up
+            shift_half(leg_top, leg_top + leg_h, "left", dy=-u)
+            shift_half(leg_top, leg_top + leg_h, "right", dy=-u)
+        else:
+            # Fall / land
+            fall = int((frame_idx - total_frames * 3 // 4) / (total_frames // 4) * u * 2)
+            shift_band(head_top, sz, dy=fall)
+
+    elif anim == "attack":
+        # Sword swing: wind-up → slash → follow-through → recover
+        phase = frame_idx / total_frames
+        if phase < 0.25:
+            # Wind-up: lean back, raise right arm
+            shift_band(body_top, leg_top, dx=-u)
+            shift_half(body_top, body_top + body_h, "right", dx=-u*2, dy=-u)
+        elif phase < 0.6:
+            # Slash: lunge forward hard
+            lunge = int((phase - 0.25) / 0.35 * u * 3)
+            shift_band(body_top, leg_top, dx=lunge)
+            shift_half(body_top, body_top + body_h, "right", dx=lunge + u*2)
+            shift_band(head_top, body_top, dx=lunge // 2)
+            # Swing right arm down fast
+            swing = int((phase - 0.25) / 0.35 * u * 4)
+            shift_half(body_top + body_h // 2, leg_top, "right", dx=lunge, dy=swing)
+        else:
+            # Follow-through / recover
+            recover = int((1 - phase) / 0.4 * u)
+            shift_band(body_top, leg_top, dx=recover)
+
+    elif anim == "hurt":
+        # Flash back: whole body jerks left then recovers
+        if frame_idx < total_frames // 2:
+            jerk = u * 2
+            shift_band(head_top, sz, dx=-jerk)
+        # Tint red — draw transparent red overlay
+        red_alpha = 120 if frame_idx < total_frames // 2 else 0
+        d.rectangle([0, 0, sz, sz], fill=(255, 60, 60, red_alpha))
+
+    elif anim == "die":
+        # Fall over: rotate/slide progressively right and down
+        progress = frame_idx / total_frames
+        fall_x   = int(progress * sz * 0.4)
+        fall_y   = int(progress * sz * 0.3)
+        # Move whole sprite down and right
+        full = img.crop((0, 0, sz, sz))
+        img  = Image.new("RGBA", (sz, sz), (0, 0, 0, 0))
+        paste_x = min(fall_x, sz - 1)
+        paste_y2 = min(fall_y, sz - 1)
+        img.paste(full, (paste_x, paste_y2), full)
+        # Fade out at end
+        if progress > 0.6:
+            alpha  = int((1 - progress) / 0.4 * 255)
+            faded  = img.copy()
+            r2, g2, b2, a2 = faded.split()
+            a2     = a2.point(lambda p: int(p * alpha / 255))
+            img    = Image.merge("RGBA", (r2, g2, b2, a2))
+
+    return img
+
+
 def build_spritesheet(base_img, animations, fps=8):
-    sz     = base_img.width
-    cols   = fps
-    rows   = len(animations)
-    sheet  = Image.new("RGBA", (sz * cols, sz * rows), (0,0,0,0))
-    atlas  = {"frames": {}, "meta": {"size": {"w": sz*cols, "h": sz*rows}}}
+    sz    = base_img.width
+    cols  = fps
+    rows  = len(animations)
+    sheet = Image.new("RGBA", (sz * cols, sz * rows), (0, 0, 0, 0))
+    atlas = {"frames": {}, "meta": {"size": {"w": sz * cols, "h": sz * rows}}}
+
     for ri, anim in enumerate(animations):
         for ci in range(cols):
-            oy = 1 if (anim == "idle" and ci % 2 == 0) else \
-                (1 if (anim in ("walk","run") and ci % 2 == 0) else
-                (-1 if (anim in ("walk","run") and ci % 2 == 1) else 0))
-            frame = Image.new("RGBA", (sz, sz), (0,0,0,0))
-            paste_y = max(0, min(oy, sz - base_img.height))
-            frame.paste(base_img, (0, paste_y), base_img)
+            frame = animate_frame(base_img, anim, ci, cols)
             sheet.paste(frame, (ci * sz, ri * sz))
             key = f"{anim}_{ci:02d}"
             atlas["frames"][key] = {
-                "frame": {"x": ci*sz, "y": ri*sz, "w": sz, "h": sz},
-                "animation": anim, "frame_index": ci,
+                "frame":       {"x": ci * sz, "y": ri * sz, "w": sz, "h": sz},
+                "animation":   anim,
+                "frame_index": ci,
             }
     return sheet, atlas
 
