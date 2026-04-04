@@ -619,8 +619,18 @@ def build_spritesheet_ai(base_prompt: str, char_data: dict, animations: list,
                 if status_callback:
                     status_callback(f"  ⚠️ {anim} frame {ci+1} failed — using placeholder")
                 frame = make_placeholder(sz, p1, p2, char_data.get("living_type","Human"))
+            else:
+                if status_callback:
+                    status_callback(f"  ✅ {anim} frame {ci+1} — AI image received")
 
-            sheet.paste(frame, (ci * sz, ri * sz))
+            # Ensure exact size before pasting
+            if frame.size != (sz, sz):
+                frame = frame.resize((sz, sz), Image.NEAREST)
+
+            # Paste onto transparent background (in case frame has white bg remnants)
+            frame_canvas = Image.new("RGBA", (sz, sz), (0, 0, 0, 0))
+            frame_canvas.paste(frame, (0, 0))
+            sheet.paste(frame_canvas, (ci * sz, ri * sz))
             key = f"{anim}_{ci:02d}"
             atlas["frames"][key] = {
                 "frame": {"x": ci*sz, "y": ri*sz, "w": sz, "h": sz},
