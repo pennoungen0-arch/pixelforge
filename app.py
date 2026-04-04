@@ -169,6 +169,32 @@ LIVING_TYPES = {
     "Animal": {"icon": "🐺", "desc": "Beast-folk, familiars, mounts, creatures"},
     "Other":  {"icon": "👾", "desc": "Monsters, aliens, plants, mystical beings"},
 }
+
+CHARACTER_CLASSES = {
+    "Human": {
+        "Fantasy":  ["⚔️ Warrior",  "🔮 Mage",     "🗡️ Rogue",    "🛡️ Paladin",
+                     "🏹 Ranger",   "✨ Cleric",    "🔥 Warlock",  "📜 Scholar"],
+        "Sci-Fi":   ["🤖 Cyborg",   "👨‍🚀 Pilot",    "🔬 Scientist","💻 Hacker",
+                     "🪖 Soldier",  "🧬 Bio-Mech",  "⚡ Gunner",   "🕵️ Agent"],
+        "Modern":   ["🥊 Fighter",  "🏃 Runner",    "🎭 Performer","🧑‍🍳 Crafter",
+                     "🕵️ Detective","🧑‍⚕️ Medic",    "🧑‍🔧 Engineer","🎯 Sniper"],
+    },
+    "Animal": {
+        "Fantasy":  ["🐺 Wolf-folk","🦊 Fox-folk",  "🐉 Dragonkin","🦁 Lion-folk",
+                     "🐻 Bear-folk","🦅 Bird-folk",  "🐍 Snake-folk","🦋 Fae-beast"],
+        "Sci-Fi":   ["🤖 Mech-beast","🧬 Mutant",   "👾 Alien-pet", "🦾 Cyborg-pet"],
+        "Wild":     ["🐯 Hunter",   "🦌 Scout",     "🐗 Berserker", "🦜 Trickster"],
+    },
+    "Other": {
+        "Fantasy":  ["👹 Demon",    "👼 Angel",     "🧟 Undead",   "🧚 Fae",
+                     "🌿 Plant",    "🪨 Golem",     "💀 Lich",     "🌊 Elemental"],
+        "Sci-Fi":   ["👽 Alien",    "🤖 Android",   "🌌 Cosmic",   "🦠 Parasite",
+                     "☢️ Mutant",   "🔮 Psionic",   "🛸 Drone",    "💠 Crystal"],
+        "Mystical": ["🐲 Dragon",   "🦄 Unicorn",   "🔱 Titan",    "🌑 Shadow",
+                     "⭐ Celestial","🍄 Shroom",    "🌀 Void",     "🕯️ Wraith"],
+    },
+}
+
 ANIMATIONS   = ["idle", "walk", "run", "jump", "attack", "hurt", "die"]
 SPRITE_SIZES = [16, 32, 48, 64, 128]
 MODULAR_PARTS = {
@@ -179,7 +205,8 @@ MODULAR_PARTS = {
 
 # ── Session state ──────────────────────────────────────────────────────────────
 for k, v in {
-    "living_type": None, "mode": "full", "character_data": None,
+    "living_type": None, "char_class": None, "char_genre": "Fantasy",
+    "mode": "full", "character_data": None,
     "generated_images": {}, "final_sheet": None, "final_atlas": None,
     "gdscript": None, "selected_anims": [], "fps": 8,
     "seed": random.randint(10000, 99999),
@@ -407,26 +434,22 @@ def make_placeholder(size, primary, secondary, living_type="Human"):
     return result.resize((size, size), Image.NEAREST)
 def generate_image(prompt, size=64):
     """
-    Generate character image via Pollinations.ai — free, no key needed.
-    Uses a solid magenta background so we can chroma-key it out cleanly.
+    Generate via Pollinations then aggressively remove background.
+    We request a plain white background + use corner-flood-fill removal.
     """
     import urllib.parse
     pixel_prompt = (
-        f"pixel art 16-bit RPG character sprite, side view, full body standing pose, "
-        f"{prompt}, "
-        f"SNES style, Chrono Trigger style, Final Fantasy 6 style, "
-        f"clean black outlines, flat cel shading, limited color palette, "
-        f"pure solid magenta background (#FF00FF), character centered, "
-        f"no scenery, no ground, no shadows, no gradients in background"
+        f"pixel art 16-bit RPG sprite, {prompt}, "
+        f"SNES Chrono Trigger style, black outlines, flat shading, "
+        f"character ONLY, pure white background, no scenery no environment no ground"
     )
     encoded = urllib.parse.quote(pixel_prompt)
-    url = f"https://image.pollinations.ai/prompt/{encoded}?width=512&height=512&nologo=true&model=flux&seed=42"
+    url = f"https://image.pollinations.ai/prompt/{encoded}?width=512&height=512&nologo=true&model=flux"
     try:
         r = requests.get(url, timeout=90)
         if r.status_code == 200 and "image" in r.headers.get("content-type", ""):
             img = Image.open(io.BytesIO(r.content)).convert("RGBA")
             img = remove_bg(img)
-            # Downscale to sprite size with crisp pixels
             img = img.resize((size * 4, size * 4), Image.LANCZOS)
             img = img.resize((size, size), Image.NEAREST)
             return img
@@ -706,7 +729,7 @@ left, right = st.columns([1, 1.7], gap="large")
 # ── LEFT: Controls ────────────────────────────────────────────────────────────
 with left:
 
-    # 01 Living Type
+    # 01 Living Type + Class + Genre
     st.markdown('<div class="pf-card"><div class="pf-card-title">// 01 — LIVING TYPE</div>', unsafe_allow_html=True)
     tcols = st.columns(3)
     for i, (lt, info) in enumerate(LIVING_TYPES.items()):
@@ -715,9 +738,45 @@ with left:
             if st.button(f"{info['icon']} {lt}", key=f"lt_{lt}", use_container_width=True,
                          type="primary" if active else "secondary"):
                 st.session_state.living_type = lt
+                st.session_state.char_class  = None
                 st.rerun()
+
+    # Genre selector (Fantasy / Sci-Fi / etc) — shown after type selected
     if st.session_state.living_type:
-        st.caption(f"▸ {LIVING_TYPES[st.session_state.living_type]['desc']}")
+        lt = st.session_state.living_type
+        genres = list(CHARACTER_CLASSES[lt].keys())
+        st.write("")
+        gcols = st.columns(len(genres))
+        for gi, genre in enumerate(genres):
+            with gcols[gi]:
+                active_g = st.session_state.char_genre == genre
+                if st.button(genre, key=f"genre_{genre}", use_container_width=True,
+                             type="primary" if active_g else "secondary"):
+                    st.session_state.char_genre = genre
+                    st.session_state.char_class = None
+                    st.rerun()
+
+        # Class buttons
+        genre = st.session_state.char_genre
+        if genre not in CHARACTER_CLASSES[lt]:
+            genre = list(CHARACTER_CLASSES[lt].keys())[0]
+            st.session_state.char_genre = genre
+
+        classes = CHARACTER_CLASSES[lt][genre]
+        st.write("")
+        n_cols = 4
+        for row_start in range(0, len(classes), n_cols):
+            row_classes = classes[row_start:row_start+n_cols]
+            ccols = st.columns(len(row_classes))
+            for ci2, cls in enumerate(row_classes):
+                with ccols[ci2]:
+                    active_c = st.session_state.char_class == cls
+                    if st.button(cls, key=f"cls_{cls}", use_container_width=True,
+                                 type="primary" if active_c else "secondary"):
+                        st.session_state.char_class = cls
+                        st.rerun()
+        if st.session_state.char_class:
+            st.caption(f"▸ {st.session_state.char_genre} {lt} — {st.session_state.char_class}")
     st.markdown('</div>', unsafe_allow_html=True)
 
     # 02 Gender
@@ -777,8 +836,11 @@ with left:
 
             # Step 1 — AI designs character
             st.write("🤖 AI designing character...")
+            char_class = st.session_state.char_class or ""
+            char_genre  = st.session_state.char_genre or "Fantasy"
+            class_desc  = f"{char_genre} {lt} — {char_class}" if char_class else f"{char_genre} {lt}"
             sys_p = f"""You are an expert pixel art RPG character designer.
-Design a unique {lt.lower()} character. Be specific and creative.
+Design a unique {class_desc} character. Be specific and creative.
 {"User hint: " + hint.strip() if hint.strip() else "Full randomization — be unexpected."}
 Return ONLY valid JSON, no markdown:
 {{
@@ -807,7 +869,7 @@ Return ONLY valid JSON, no markdown:
     "special": "wings, tail, aura, markings, etc"
   }}
 }}"""
-            usr_p = f"Living type: {lt}\nGender: {gender}\nSeed: {st.session_state.seed}"
+            usr_p = f"Living type: {lt}\nGenre: {char_genre}\nClass: {char_class or 'random'}\nGender: {gender}\nSeed: {st.session_state.seed}"
 
             try:
                 raw  = call_groq(sys_p, usr_p, temperature=1.0, max_tokens=2500)
@@ -828,7 +890,8 @@ Return ONLY valid JSON, no markdown:
 
             if mode == "full":
                 st.write(f"🎨 Generating sprite ({sprite_size}px)...")
-                img = generate_image(data.get("image_prompt","pixel art RPG character"), size=sprite_size)
+                class_hint = f"{char_class} " if char_class else ""
+                img = generate_image(class_hint + data.get("image_prompt","pixel art RPG character"), size=sprite_size)
                 if img is None:
                     st.write("⚠️ HF unavailable — using RPG pixel placeholder")
                     img = make_placeholder(sprite_size, p1, p2, lt)
