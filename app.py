@@ -407,26 +407,26 @@ def make_placeholder(size, primary, secondary, living_type="Human"):
     return result.resize((size, size), Image.NEAREST)
 def generate_image(prompt, size=64):
     """
-    Generate character image via Pollinations.ai — completely free, no key needed.
-    Falls back to placeholder if unavailable.
+    Generate character image via Pollinations.ai — free, no key needed.
+    Uses a solid magenta background so we can chroma-key it out cleanly.
     """
+    import urllib.parse
     pixel_prompt = (
-        f"pixel art 16-bit RPG character sprite, side view, full body, "
+        f"pixel art 16-bit RPG character sprite, side view, full body standing pose, "
         f"{prompt}, "
         f"SNES style, Chrono Trigger style, Final Fantasy 6 style, "
-        f"clean black outlines, flat shading, limited color palette, "
-        f"white background, centered character, no background"
+        f"clean black outlines, flat cel shading, limited color palette, "
+        f"pure solid magenta background (#FF00FF), character centered, "
+        f"no scenery, no ground, no shadows, no gradients in background"
     )
-    import urllib.parse
     encoded = urllib.parse.quote(pixel_prompt)
-    # Pollinations generates at 512x512, we downscale to sprite size
-    url = f"https://image.pollinations.ai/prompt/{encoded}?width=512&height=512&nologo=true&model=flux"
+    url = f"https://image.pollinations.ai/prompt/{encoded}?width=512&height=512&nologo=true&model=flux&seed=42"
     try:
-        r = requests.get(url, timeout=60)
+        r = requests.get(url, timeout=90)
         if r.status_code == 200 and "image" in r.headers.get("content-type", ""):
             img = Image.open(io.BytesIO(r.content)).convert("RGBA")
-            img = remove_white_bg(img)
-            # Downscale with LANCZOS for smooth result, then nearest for pixel crispness
+            img = remove_bg(img)
+            # Downscale to sprite size with crisp pixels
             img = img.resize((size * 4, size * 4), Image.LANCZOS)
             img = img.resize((size, size), Image.NEAREST)
             return img
@@ -434,158 +434,148 @@ def generate_image(prompt, size=64):
         pass
     return None
 
-def remove_white_bg(img: Image.Image, threshold=240) -> Image.Image:
-    """Make white/near-white pixels transparent."""
+def remove_bg(img: Image.Image) -> Image.Image:
+    """
+    Smart background removal:
+    1. Flood-fill from all 4 corners (catches complex backgrounds)
+    2. Also remove near-white and near-magenta pixels
+    """
+    import numpy as np
     img = img.convert("RGBA")
-    data = list(img.getdata())
-    new_data = []
-    for r, g, b, a in data:
-        if r > threshold and g > threshold and b > threshold:
-            new_data.append((r, g, b, 0))
-        else:
-            new_data.append((r, g, b, a))
-    img.putdata(new_data)
-    return img
+    data = np.array(img)
+    r, g, b, a = data[:,:,0], data[:,:,1], data[:,:,2], data[:,:,3]
+
+    # Mask: near-white OR near-magenta OR near-light-grey background pixels
+    near_white   = (r > 220) & (g > 220) & (b > 220)
+    near_magenta = (r > 180) & (g < 80)  & (b > 180)
+    near_grey    = (r > 200) & (g > 200) & (b > 200) & (np.abs(r.astype(int) - g.astype(int)) < 20)
+    # Also catch typical AI sky blues and scene colors at edges
+    near_blue_sky = (b > 180) & (r < 150) & (g > 150)
+
+    bg_mask = near_white | near_magenta | near_grey
+
+    # Flood fill from corners to find connected background
+    from PIL import ImageFilter
+    h, w = data.shape[:2]
+    visited = np.zeros((h, w), dtype=bool)
+    stack = []
+    for corner in [(0,0),(0,w-1),(h-1,0),(h-1,w-1)]:
+        if not visited[corner]:
+            stack.append(corner)
+    # BFS flood fill
+    while stack:
+        y, x = stack.pop()
+        if y < 0 or y >= h or x < 0 or x >= w or visited[y,x]:
+            continue
+        visited[y,x] = True
+        pr, pg, pb = int(r[y,x]), int(g[y,x]), int(b[y,x])
+        # If pixel is background-like, spread fill
+        is_bg = (pr > 180 and pg > 180 and pb > 180) or                 (pr > 160 and pb > 160 and pg < 100) or                 (abs(pr-pg) < 30 and abs(pg-pb) < 30 and pr > 150)
+        if is_bg:
+            bg_mask[y,x] = True
+            for dy, dx in [(-1,0),(1,0),(0,-1),(0,1)]:
+                stack.append((y+dy, x+dx))
+
+    # Apply transparency to background pixels
+    data[bg_mask, 3] = 0
+
+    # Slight edge feathering — make semi-transparent pixels at edges
+    result = Image.fromarray(data, 'RGBA')
+    return result
 
 def animate_frame(base_img, anim, frame_idx, total_frames):
     """
-    Return a new PIL Image with pixel-art animation applied to the base sprite.
-    Works by manipulating pixel regions to simulate limb movement.
+    Generate an animation frame by compositing transformed copies of the sprite.
+    Instead of tearing pixels, we copy the whole sprite and offset/crop it
+    to simulate movement — clean with no glitching.
     """
-    sz  = base_img.width
-    img = base_img.copy()
-    d   = ImageDraw.Draw(img)
-    t   = frame_idx / max(total_frames - 1, 1)   # 0.0 → 1.0
-    u   = max(1, sz // 16)                         # base unit
-
-    # Key body region boundaries (approximate, matches make_placeholder)
-    head_top   = sz // 10
-    head_h     = sz // 5
-    body_top   = head_top + head_h + max(1, sz // 32)
-    body_h     = sz // 3
-    leg_top    = body_top + body_h
-    leg_h      = sz // 4
-    cx         = sz // 2
-
-    # Helper: shift a horizontal band of pixels vertically by dy
-    def shift_band(y_start, y_end, dx=0, dy=0):
-        if dy == 0 and dx == 0:
-            return
-        band = img.crop((0, y_start, sz, y_end))
-        # Clear original area
-        d.rectangle([0, y_start, sz, y_end], fill=(0, 0, 0, 0))
-        img.paste(band, (dx, y_start + dy), band)
-
-    # Helper: shift left or right half
-    def shift_half(y_start, y_end, side, dx=0, dy=0):
-        if side == "left":
-            band = img.crop((0, y_start, cx, y_end))
-            d.rectangle([0, y_start, cx, y_end], fill=(0, 0, 0, 0))
-            img.paste(band, (dx, y_start + dy), band)
-        else:
-            band = img.crop((cx, y_start, sz, y_end))
-            d.rectangle([cx, y_start, sz, y_end], fill=(0, 0, 0, 0))
-            img.paste(band, (cx + dx, y_start + dy), band)
-
     import math
-    sin_t = math.sin(t * math.pi * 2)   # full sine wave over animation
-    cos_t = math.cos(t * math.pi * 2)
+    sz  = base_img.width
+    t   = frame_idx / max(total_frames - 1, 1)   # 0.0 → 1.0
+    u   = max(1, sz // 32)                         # 1 motion unit
+    sin_t = math.sin(t * math.pi * 2)
+
+    # Canvas slightly taller to allow movement without clipping
+    pad    = sz // 8
+    canvas = Image.new("RGBA", (sz, sz + pad * 2), (0, 0, 0, 0))
+
+    def paste_sprite(offset_x=0, offset_y=0):
+        canvas.paste(base_img, (offset_x, pad + offset_y), base_img)
 
     if anim == "idle":
-        # Gentle bob — whole body shifts up/down by 1px on even frames
-        bob = 1 if frame_idx % 2 == 0 else 0
-        shift_band(head_top, sz, dy=bob)
+        # Gentle breathing bob: 1-2px up/down
+        bob = int(math.sin(t * math.pi * 2) * u)
+        paste_sprite(offset_y=bob)
 
-    elif anim in ("walk", "run"):
-        speed  = 2 if anim == "run" else 1
-        # Legs alternate: left leg forward, right leg back
-        leg_swing = int(sin_t * u * speed)
-        # Left leg
-        shift_half(leg_top, leg_top + leg_h, "left", dy=max(-u, min(u, leg_swing)))
-        # Right leg (opposite phase)
-        shift_half(leg_top, leg_top + leg_h, "right", dy=max(-u, min(u, -leg_swing)))
-        # Body slight lean
-        body_shift = int(sin_t * (u // 2) * speed)
-        shift_band(body_top, leg_top, dy=body_shift)
-        # Arms swing opposite to legs
-        # Left arm shifts down when left leg goes forward
-        shift_half(body_top, body_top + body_h // 2, "left", dy=-leg_swing)
-        shift_half(body_top, body_top + body_h // 2, "right", dy=leg_swing)
-        # Head bob
-        head_bob = abs(int(sin_t * u // 2))
-        shift_band(head_top, body_top, dy=head_bob)
+    elif anim == "walk":
+        # Body bobs up on every other frame, slight x sway
+        bob   = abs(int(sin_t * u * 1.5))
+        sway  = int(sin_t * u)
+        paste_sprite(offset_x=sway, offset_y=-bob)
+
+    elif anim == "run":
+        # More aggressive bob and lean forward
+        bob  = abs(int(sin_t * u * 3))
+        lean = int(sin_t * u * 1.5)
+        paste_sprite(offset_x=lean, offset_y=-bob)
 
     elif anim == "jump":
-        # Phases: crouch → rise → peak → fall → land
-        if frame_idx < total_frames // 4:
-            # Crouch: compress legs
-            crouch = u
-            shift_band(leg_top, leg_top + leg_h, dy=-crouch)
-            shift_band(body_top, leg_top, dy=crouch // 2)
-        elif frame_idx < total_frames * 3 // 4:
-            # Rise / peak: whole body goes up, legs tuck
-            rise = int((frame_idx - total_frames // 4) / (total_frames // 2) * u * 3)
-            shift_band(head_top, sz, dy=-rise)
-            # Tuck legs up
-            shift_half(leg_top, leg_top + leg_h, "left", dy=-u)
-            shift_half(leg_top, leg_top + leg_h, "right", dy=-u)
+        # Arc: crouch → rise → peak → fall
+        if t < 0.15:
+            # Crouch: move down
+            paste_sprite(offset_y=int(u * 2 * (t / 0.15)))
+        elif t < 0.5:
+            # Rise: move up fast
+            rise = int(u * 8 * ((t - 0.15) / 0.35))
+            paste_sprite(offset_y=-rise)
+        elif t < 0.7:
+            # Peak: hold high
+            paste_sprite(offset_y=-int(u * 8))
         else:
-            # Fall / land
-            fall = int((frame_idx - total_frames * 3 // 4) / (total_frames // 4) * u * 2)
-            shift_band(head_top, sz, dy=fall)
+            # Fall
+            fall = int(u * 8 * (1 - (t - 0.7) / 0.3))
+            paste_sprite(offset_y=-fall)
 
     elif anim == "attack":
-        # Sword swing: wind-up → slash → follow-through → recover
-        phase = frame_idx / total_frames
-        if phase < 0.25:
-            # Wind-up: lean back, raise right arm
-            shift_band(body_top, leg_top, dx=-u)
-            shift_half(body_top, body_top + body_h, "right", dx=-u*2, dy=-u)
-        elif phase < 0.6:
-            # Slash: lunge forward hard
-            lunge = int((phase - 0.25) / 0.35 * u * 3)
-            shift_band(body_top, leg_top, dx=lunge)
-            shift_half(body_top, body_top + body_h, "right", dx=lunge + u*2)
-            shift_band(head_top, body_top, dx=lunge // 2)
-            # Swing right arm down fast
-            swing = int((phase - 0.25) / 0.35 * u * 4)
-            shift_half(body_top + body_h // 2, leg_top, "right", dx=lunge, dy=swing)
+        # Lunge forward and back
+        if t < 0.3:
+            # Wind-up: pull back
+            paste_sprite(offset_x=-int(u * 2 * (t / 0.3)))
+        elif t < 0.6:
+            # Strike: lunge forward hard
+            lunge = int(u * 5 * ((t - 0.3) / 0.3))
+            paste_sprite(offset_x=lunge)
         else:
-            # Follow-through / recover
-            recover = int((1 - phase) / 0.4 * u)
-            shift_band(body_top, leg_top, dx=recover)
+            # Recover
+            lunge = int(u * 5 * (1 - (t - 0.6) / 0.4))
+            paste_sprite(offset_x=lunge)
 
     elif anim == "hurt":
-        # Flash back: whole body jerks left then recovers
-        if frame_idx < total_frames // 2:
-            jerk = u * 2
-            shift_band(head_top, sz, dx=-jerk)
-        # Tint red — draw transparent red overlay
-        red_alpha = 120 if frame_idx < total_frames // 2 else 0
-        d.rectangle([0, 0, sz, sz], fill=(255, 60, 60, red_alpha))
+        # Knockback: jerk left, flash
+        knockback = -int(u * 4 * (1 - t))
+        paste_sprite(offset_x=knockback)
+        # Red flash overlay on first half
+        if t < 0.5:
+            alpha = int(150 * (1 - t * 2))
+            overlay = Image.new("RGBA", (sz, sz + pad * 2), (255, 50, 50, alpha))
+            canvas = Image.alpha_composite(canvas, overlay)
 
     elif anim == "die":
-        # Fall over: rotate/slide progressively right and down
-        progress = frame_idx / total_frames
-        fall_x   = int(progress * sz * 0.4)
-        fall_y   = int(progress * sz * 0.3)
-        # Move whole sprite down and right
-        full = img.crop((0, 0, sz, sz))
-        img  = Image.new("RGBA", (sz, sz), (0, 0, 0, 0))
-        paste_x = min(fall_x, sz - 1)
-        paste_y2 = min(fall_y, sz - 1)
-        img.paste(full, (paste_x, paste_y2), full)
-        # Fade out at end
-        if progress > 0.6:
-            alpha  = int((1 - progress) / 0.4 * 255)
-            faded  = img.copy()
-            r2, g2, b2, a2 = faded.split()
-            a2     = a2.point(lambda p: int(p * alpha / 255))
-            img    = Image.merge("RGBA", (r2, g2, b2, a2))
+        # Fall: slide down and fade out
+        fall  = int(t * sz * 0.4)
+        alpha = max(0, int(255 * (1 - t)))
+        paste_sprite(offset_y=fall)
+        # Fade
+        r2, g2, b2, a2 = canvas.split()
+        a2 = a2.point(lambda p: int(p * alpha / 255))
+        canvas = Image.merge("RGBA", (r2, g2, b2, a2))
 
-    return img
+    else:
+        paste_sprite()
 
-
+    # Crop back to sz×sz, centered
+    cropped = canvas.crop((0, pad, sz, pad + sz))
+    return cropped
 def build_spritesheet(base_img, animations, fps=8):
     sz    = base_img.width
     cols  = fps
