@@ -425,199 +425,165 @@ def make_placeholder(size, primary, secondary, living_type="Human"):
     final = Image.composite(dark_layer, Image.new("RGBA", (w,w), (0,0,0,0)), mask)
     result = Image.alpha_composite(final, img)
     return result.resize((size, size), Image.NEAREST)
-def generate_image(prompt, size=64):
-    """
-    Generate via Pollinations then use rembg for clean AI-powered background removal.
-    rembg uses a neural network (U2Net) specifically trained for this task.
-    """
-    import urllib.parse
-
-    pixel_prompt = (
-        f"pixel art 16-bit RPG game character, single character, full body standing, "
-        f"side view profile, {prompt}, "
-        f"SNES style, Chrono Trigger art style, Final Fantasy 6, "
-        f"clean black pixel outlines, flat cel shading, limited color palette"
-    )
-    encoded = urllib.parse.quote(pixel_prompt)
-
-    for model in ["flux", "flux-realism"]:
-        url = (
-            f"https://image.pollinations.ai/prompt/{encoded}"
-            f"?width=512&height=512&nologo=true&model={model}&enhance=false"
-        )
-        try:
-            r = requests.get(url, timeout=90)
-            if r.status_code == 200 and "image" in r.headers.get("content-type", ""):
-                img = Image.open(io.BytesIO(r.content)).convert("RGBA")
-                img = remove_bg(img)
-                # Verify something is visible
-                import numpy as np
-                visible = (np.array(img)[:,:,3] > 10).sum()
-                if visible < 500:
-                    continue
-                img = img.resize((size * 4, size * 4), Image.LANCZOS)
-                img = img.resize((size, size), Image.NEAREST)
-                return img
-        except Exception:
-            continue
-    return None
-
-
 def remove_bg(img: Image.Image) -> Image.Image:
-    """
-    Use rembg (U2Net neural network) for proper AI background removal.
-    Falls back to flood-fill if rembg not available.
-    """
+    """Use rembg neural network for clean background removal."""
     try:
         from rembg import remove as rembg_remove
         buf_in = io.BytesIO()
-        img.save(buf_in, format="PNG")
+        img.convert("RGBA").save(buf_in, format="PNG")
         buf_in.seek(0)
-        buf_out = io.BytesIO()
-        rembg_remove(buf_in, buf_out)
-        buf_out.seek(0)
-        return Image.open(buf_out).convert("RGBA")
-    except ImportError:
-        pass
+        result = rembg_remove(buf_in.read())
+        return Image.open(io.BytesIO(result)).convert("RGBA")
     except Exception:
         pass
-
-    # Fallback: flood-fill from edges
+    # Fallback: flood fill from edges
     import numpy as np
-    img = img.convert("RGBA")
-    arr = np.array(img, dtype=np.int32)
+    img  = img.convert("RGBA")
+    arr  = np.array(img, dtype=np.int32)
     rv, gv, bv = arr[:,:,0], arr[:,:,1], arr[:,:,2]
     h, w = rv.shape
-    bg_mask = np.zeros((h, w), dtype=bool)
-    visited = np.zeros((h, w), dtype=bool)
-
+    bg   = np.zeros((h, w), dtype=bool)
+    vis  = np.zeros((h, w), dtype=bool)
     def is_bg(py, px):
-        pr, pg, pb = int(rv[py,px]), int(gv[py,px]), int(bv[py,px])
-        brightness = (pr + pg + pb) // 3
-        if brightness > 210 and abs(pr-pg) < 20 and abs(pg-pb) < 20:
-            return True
-        if pb > 150 and pg > 140 and pr < 160 and pb > pr + 30:
-            return True
-        if pr > 150 and pb > 150 and pg < 90:
-            return True
-        if pr > 200 and pg > 185 and pb > 160 and brightness > 190:
-            return True
+        pr,pg,pb = int(rv[py,px]),int(gv[py,px]),int(bv[py,px])
+        br = (pr+pg+pb)//3
+        if br>210 and abs(pr-pg)<20 and abs(pg-pb)<20: return True
+        if pb>150 and pg>140 and pr<160 and pb>pr+30:  return True
+        if pr>200 and pg>185 and pb>160 and br>190:    return True
         return False
-
-    stack = (
-        [(0,x) for x in range(w)] + [(h-1,x) for x in range(w)] +
-        [(y,0) for y in range(h)] + [(y,w-1) for y in range(h)]
-    )
+    stack = ([(0,x) for x in range(w)]+[(h-1,x) for x in range(w)]+
+             [(y,0) for y in range(h)]+[(y,w-1) for y in range(h)])
     while stack:
-        py, px = stack.pop()
-        if py < 0 or py >= h or px < 0 or px >= w or visited[py,px]:
-            continue
-        visited[py,px] = True
-        if is_bg(py, px):
-            bg_mask[py,px] = True
+        py,px = stack.pop()
+        if py<0 or py>=h or px<0 or px>=w or vis[py,px]: continue
+        vis[py,px] = True
+        if is_bg(py,px):
+            bg[py,px] = True
             stack += [(py-1,px),(py+1,px),(py,px-1),(py,px+1)]
+    res = np.array(img, dtype=np.uint8)
+    res[bg, 3] = 0
+    return Image.fromarray(res, "RGBA")
 
-    result = np.array(img, dtype=np.uint8)
-    result[bg_mask, 3] = 0
-    return Image.fromarray(result, "RGBA")
+
+def fetch_frame(prompt: str, size: int) -> Image.Image | None:
+    """Fetch one frame from Pollinations + remove background."""
+    import urllib.parse
+    encoded = urllib.parse.quote(prompt)
+    url = (f"https://image.pollinations.ai/prompt/{encoded}"
+           f"?width=512&height=512&nologo=true&model=flux&enhance=false")
+    try:
+        r = requests.get(url, timeout=90)
+        if r.status_code == 200 and "image" in r.headers.get("content-type",""):
+            img = Image.open(io.BytesIO(r.content)).convert("RGBA")
+            img = remove_bg(img)
+            import numpy as np
+            if (np.array(img)[:,:,3] > 10).sum() < 200:
+                return None
+            return img.resize((size, size), Image.NEAREST)
+    except Exception:
+        pass
+    return None
 
 
-def animate_frame(base_img, anim, frame_idx, total_frames):
+# Pose descriptions for each animation frame
+POSE_DESCRIPTIONS = {
+    "idle": [
+        "standing upright, neutral relaxed pose, weight on both feet",
+        "standing upright, slight inhale, chest slightly expanded",
+        "standing upright, neutral relaxed pose, arms slightly lowered",
+        "standing upright, slight exhale, shoulders slightly down",
+    ],
+    "walk": [
+        "walking, left foot forward, right arm forward, mid-stride",
+        "walking, transferring weight, both feet near ground",
+        "walking, right foot forward, left arm forward, mid-stride",
+        "walking, transferring weight, pushing off back foot",
+    ],
+    "run": [
+        "running fast, left leg lunging forward, leaning forward, arms pumping",
+        "running fast, airborne both feet off ground, body fully extended",
+        "running fast, right leg lunging forward, leaning forward, arms pumping",
+        "running fast, landing on left foot, knees bent, momentum forward",
+    ],
+    "jump": [
+        "crouching down, knees bent deeply, preparing to jump",
+        "launching upward, legs extending, arms raising above head",
+        "peak of jump, fully airborne, arms wide, legs slightly tucked",
+        "landing, knees absorbing impact, arms out for balance",
+    ],
+    "attack": [
+        "winding up attack, weapon raised behind head, weight shifted back",
+        "mid-swing attack, weapon slashing forward with full force",
+        "follow-through after attack, weapon extended, body twisted",
+        "recovering stance, weapon returning, guard position",
+    ],
+    "hurt": [
+        "recoiling from hit, body jerking backward, face wincing",
+        "stumbling from impact, off-balance, one arm guarding face",
+        "recovering from hit, hunched slightly, defensive position",
+        "regaining footing, still pained, guard raised",
+    ],
+    "die": [
+        "staggering, badly wounded, knees beginning to buckle",
+        "falling forward, losing balance completely, arms flailing",
+        "hitting the ground, collapsed on knees and elbows",
+        "lying collapsed on ground, motionless, face down",
+    ],
+}
+
+
+def build_spritesheet_ai(base_prompt: str, char_data: dict, animations: list,
+                          fps: int, sprite_size: int, status_callback=None) -> tuple:
     """
-    Create animation frames by moving the WHOLE sprite cleanly.
-    Never crops or slices the image — only translates and composites.
+    Generate each animation frame as a separate AI image.
+    This is the AutoSprite approach — one image per pose per frame.
     """
     import math
-    sz    = base_img.width
-    t     = frame_idx / max(total_frames - 1, 1)
-    u     = max(1, sz // 24)
-    sin_t = math.sin(t * math.pi * 2)
-    cos_t = math.cos(t * math.pi * 2)
+    sz      = sprite_size
+    frames_per_anim = min(fps, 4)  # 4 unique AI frames per animation, then loop
+    sheet   = Image.new("RGBA", (sz * frames_per_anim, sz * len(animations)), (0,0,0,0))
+    atlas   = {"frames": {}, "meta": {"size": {"w": sz*frames_per_anim, "h": sz*len(animations)}}}
 
-    # Extra padding so sprite can move without clipping
-    pad    = sz // 4
-    canvas = Image.new("RGBA", (sz + pad * 2, sz + pad * 2), (0, 0, 0, 0))
-    cx, cy = pad, pad  # default paste position
+    char_name = char_data.get("character_name", "character")
+    species   = char_data.get("species", "")
+    outfit    = char_data.get("outfit", "")
+    palette   = char_data.get("color_palette", "")
+    art_style = char_data.get("art_style", "pixel art 16-bit RPG")
 
-    if anim == "idle":
-        # Subtle breathe: 1px vertical bob
-        cy += int(math.sin(t * math.pi * 2) * u * 0.8)
+    # Core character description — stays consistent across all frames
+    char_desc = (
+        f"{art_style} sprite, {species} character, {outfit}, "
+        f"{palette}, side view, full body, "
+        f"SNES Chrono Trigger Final Fantasy 6 style, "
+        f"clean black pixel outlines, flat cel shading, "
+        f"pure white plain background, no scenery"
+    )
 
-    elif anim == "walk":
-        # Step bounce: body bobs up on each step
-        cy -= int(abs(sin_t) * u * 1.5)
-        cx += int(sin_t * u * 0.5)
-
-    elif anim == "run":
-        # Bigger, faster bounce
-        cy -= int(abs(sin_t) * u * 2.5)
-        cx += int(sin_t * u)
-
-    elif anim == "jump":
-        # Arc trajectory
-        if t < 0.15:
-            cy += int(u * 1.5 * (t / 0.15))          # crouch
-        elif t < 0.55:
-            rise = ((t - 0.15) / 0.4)
-            cy -= int(u * 7 * math.sin(rise * math.pi))  # rise
-        elif t < 0.75:
-            cy -= int(u * 3 * (1 - (t - 0.55) / 0.2))   # peak → fall
-        # else land (back at 0)
-
-    elif anim == "attack":
-        if t < 0.25:
-            cx -= int(u * 1.5 * (t / 0.25))   # wind-up: lean back
-        elif t < 0.55:
-            cx += int(u * 4 * ((t - 0.25) / 0.3))   # lunge forward
-        else:
-            cx += int(u * 4 * (1 - (t - 0.55) / 0.45))  # recover
-
-    elif anim == "hurt":
-        cx -= int(u * 3 * (1 - t))   # knockback left, recovers
-        # Red tint overlay
-        canvas.paste(base_img, (cx, cy), base_img)
-        if t < 0.5:
-            alpha = int(180 * (1 - t * 2))
-            red   = Image.new("RGBA", (sz, sz), (255, 60, 60, alpha))
-            tmp   = Image.new("RGBA", (sz + pad*2, sz + pad*2), (0,0,0,0))
-            tmp.paste(red, (cx, cy))
-            canvas = Image.alpha_composite(canvas, tmp)
-        # Crop and return early
-        return canvas.crop((pad, pad, pad + sz, pad + sz))
-
-    elif anim == "die":
-        # Fall sideways + fade
-        cx  += int(t * sz * 0.35)
-        cy  += int(t * sz * 0.25)
-        alpha = max(0, int(255 * (1 - t * 1.2)))
-        canvas.paste(base_img, (cx, cy), base_img)
-        r2, g2, b2, a2 = canvas.split()
-        a2 = a2.point(lambda p: int(p * alpha / 255))
-        canvas = Image.merge("RGBA", (r2, g2, b2, a2))
-        return canvas.crop((pad, pad, pad + sz, pad + sz))
-
-    canvas.paste(base_img, (cx, cy), base_img)
-    return canvas.crop((pad, pad, pad + sz, pad + sz))
-
-
-def build_spritesheet(base_img, animations, fps=8):
-    sz    = base_img.width
-    cols  = fps
-    rows  = len(animations)
-    sheet = Image.new("RGBA", (sz * cols, sz * rows), (0, 0, 0, 0))
-    atlas = {"frames": {}, "meta": {"size": {"w": sz * cols, "h": sz * rows}}}
+    p1 = hex_to_rgba(char_data.get("color_primary", "#7c3aed"))
+    p2 = hex_to_rgba(char_data.get("color_secondary", "#ff6b35"))
 
     for ri, anim in enumerate(animations):
-        for ci in range(cols):
-            frame = animate_frame(base_img, anim, ci, cols)
+        poses = POSE_DESCRIPTIONS.get(anim, POSE_DESCRIPTIONS["idle"])
+        for ci in range(frames_per_anim):
+            pose = poses[ci % len(poses)]
+            prompt = f"{char_desc}, {pose}"
+
+            if status_callback:
+                status_callback(f"  🎨 {anim} frame {ci+1}/{frames_per_anim}...")
+
+            frame = fetch_frame(prompt, sz)
+            if frame is None:
+                frame = make_placeholder(sz, p1, p2, char_data.get("living_type","Human"))
+
             sheet.paste(frame, (ci * sz, ri * sz))
             key = f"{anim}_{ci:02d}"
             atlas["frames"][key] = {
-                "frame":       {"x": ci * sz, "y": ri * sz, "w": sz, "h": sz},
-                "animation":   anim,
-                "frame_index": ci,
+                "frame": {"x": ci*sz, "y": ri*sz, "w": sz, "h": sz},
+                "animation": anim, "frame_index": ci,
             }
-    return sheet, atlas
+
+    return sheet, atlas, frames_per_anim
+
 
 def build_gdscript(char_name, char_data, animations, sprite_size, fps):
     cn = "".join(w.capitalize() for w in char_name.replace("-"," ").split())
@@ -885,52 +851,35 @@ Return ONLY valid JSON, no markdown:
             p1 = hex_to_rgba(data.get("color_primary",  "#7c3aed"))
             p2 = hex_to_rgba(data.get("color_secondary", "#ff6b35"))
 
-            # Step 2 — Images
-            gen_size = max(sprite_size * 4, 256)
-            imgs = {}
+            total_frames = len(sel_anims) * 4  # 4 AI frames per animation
+            st.write(f"🎨 Generating {total_frames} animation frames via AI (this takes a few minutes)...")
+            st.write("Each frame is a unique AI-generated pose — like AutoSprite.")
 
-            if mode == "full":
-                st.write(f"🎨 Generating sprite ({sprite_size}px)...")
-                class_hint = f"{char_class} " if char_class else ""
-                img = generate_image(class_hint + data.get("image_prompt","pixel art RPG character"), size=sprite_size)
-                if img is None:
-                    st.write("⚠️ HF unavailable — using RPG pixel placeholder")
-                    img = make_placeholder(sprite_size, p1, p2, lt)
-                imgs["full"] = img
+            # Generate full spritesheet with one AI image per frame
+            def status_cb(msg):
+                st.write(msg)
 
-            else:  # modular
-                parts = MODULAR_PARTS.get(lt, MODULAR_PARTS["Human"])
-                modular = data.get("modular_parts", {})
-                part_size = max(sprite_size * 4, 128)
-                composite = Image.new("RGBA", (sprite_size, sprite_size), (0,0,0,0))
+            sheet, atlas, frames_per_anim = build_spritesheet_ai(
+                base_prompt    = data.get("image_prompt", ""),
+                char_data      = data,
+                animations     = sel_anims,
+                fps            = fps,
+                sprite_size    = sprite_size,
+                status_callback= status_cb,
+            )
 
-                for part in parts:
-                    st.write(f"  ▸ {part}...")
-                    pdesc  = modular.get(part, f"{part} for {data.get('species','character')}")
-                    pprmt  = f"{data.get('art_style','pixel art')} {pdesc}, {data.get('color_palette','')}"
-                    pimg   = generate_image(pprmt, size=part_size)
-                    if pimg is None:
-                        pimg = make_placeholder(sprite_size, p1, p2, lt)
-                    else:
-                        pimg = pimg.resize((sprite_size, sprite_size), Image.NEAREST)
-                    imgs[part] = pimg
-                    composite  = Image.alpha_composite(composite, pimg)
-
-                imgs["full"] = composite
-
-            st.session_state.generated_images = imgs
-
-            # Step 3 — Spritesheet
-            st.write("📋 Building spritesheet...")
-            sheet, atlas = build_spritesheet(imgs["full"], sel_anims, fps)
-            st.session_state.final_sheet   = sheet
-            st.session_state.final_atlas   = atlas
+            st.session_state.final_sheet    = sheet
+            st.session_state.final_atlas    = atlas
             st.session_state.selected_anims = sel_anims
-            st.session_state.fps            = fps
+            st.session_state.fps            = frames_per_anim
 
-            # Step 4 — GDScript
+            # Save a preview frame (first idle frame)
+            preview = sheet.crop((0, 0, sprite_size, sprite_size))
+            st.session_state.generated_images = {"full": preview}
+
+            # GDScript
             st.write("🎮 Writing GDScript...")
-            gd = build_gdscript(data["character_name"], data, sel_anims, sprite_size, fps)
+            gd = build_gdscript(data["character_name"], data, sel_anims, sprite_size, frames_per_anim)
             st.session_state.gdscript = gd
 
             status.update(label="✅ Character forged!", state="complete", expanded=False)
