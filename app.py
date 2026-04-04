@@ -427,34 +427,33 @@ def make_placeholder(size, primary, secondary, living_type="Human"):
     return result.resize((size, size), Image.NEAREST)
 def generate_image(prompt, size=64):
     """
-    Try multiple free image sources in order.
-    Primary: Pollinations (flux model, reliable)
-    Fallback: placeholder sprite
+    Generate via Pollinations then use rembg for clean AI-powered background removal.
+    rembg uses a neural network (U2Net) specifically trained for this task.
     """
     import urllib.parse
 
-    # Try two different Pollinations models
+    pixel_prompt = (
+        f"pixel art 16-bit RPG game character, single character, full body standing, "
+        f"side view profile, {prompt}, "
+        f"SNES style, Chrono Trigger art style, Final Fantasy 6, "
+        f"clean black pixel outlines, flat cel shading, limited color palette"
+    )
+    encoded = urllib.parse.quote(pixel_prompt)
+
     for model in ["flux", "flux-realism"]:
-        pixel_prompt = (
-            f"pixel art 16-bit RPG game character sprite sheet frame, "
-            f"single character standing pose, full body, side view, "
-            f"{prompt}, "
-            f"SNES style, Chrono Trigger, Final Fantasy 6, "
-            f"black pixel outlines, cel shading, 16 colors max, "
-            f"plain white background, NO scenery, NO environment, NO ground tiles"
+        url = (
+            f"https://image.pollinations.ai/prompt/{encoded}"
+            f"?width=512&height=512&nologo=true&model={model}&enhance=false"
         )
-        encoded = urllib.parse.quote(pixel_prompt)
-        url = f"https://image.pollinations.ai/prompt/{encoded}?width=512&height=512&nologo=true&model={model}&enhance=false"
         try:
             r = requests.get(url, timeout=90)
             if r.status_code == 200 and "image" in r.headers.get("content-type", ""):
                 img = Image.open(io.BytesIO(r.content)).convert("RGBA")
                 img = remove_bg(img)
-                # Check we got something — if image is almost fully transparent, skip
+                # Verify something is visible
                 import numpy as np
-                arr = np.array(img)
-                visible = (arr[:,:,3] > 10).sum()
-                if visible < (size * size * 0.05):  # less than 5% visible pixels
+                visible = (np.array(img)[:,:,3] > 10).sum()
+                if visible < 500:
                     continue
                 img = img.resize((size * 4, size * 4), Image.LANCZOS)
                 img = img.resize((size, size), Image.NEAREST)
@@ -466,9 +465,24 @@ def generate_image(prompt, size=64):
 
 def remove_bg(img: Image.Image) -> Image.Image:
     """
-    Remove background using BFS flood fill from all edges.
-    Detects: white, grey, sky-blue, beige, magenta backgrounds.
+    Use rembg (U2Net neural network) for proper AI background removal.
+    Falls back to flood-fill if rembg not available.
     """
+    try:
+        from rembg import remove as rembg_remove
+        buf_in = io.BytesIO()
+        img.save(buf_in, format="PNG")
+        buf_in.seek(0)
+        buf_out = io.BytesIO()
+        rembg_remove(buf_in, buf_out)
+        buf_out.seek(0)
+        return Image.open(buf_out).convert("RGBA")
+    except ImportError:
+        pass
+    except Exception:
+        pass
+
+    # Fallback: flood-fill from edges
     import numpy as np
     img = img.convert("RGBA")
     arr = np.array(img, dtype=np.int32)
@@ -477,43 +491,30 @@ def remove_bg(img: Image.Image) -> Image.Image:
     bg_mask = np.zeros((h, w), dtype=bool)
     visited = np.zeros((h, w), dtype=bool)
 
-    def is_bg_pixel(py, px):
-        pr = int(rv[py, px])
-        pg = int(gv[py, px])
-        pb = int(bv[py, px])
+    def is_bg(py, px):
+        pr, pg, pb = int(rv[py,px]), int(gv[py,px]), int(bv[py,px])
         brightness = (pr + pg + pb) // 3
-        # White / light grey
         if brightness > 210 and abs(pr-pg) < 20 and abs(pg-pb) < 20:
             return True
-        # Sky blue
         if pb > 150 and pg > 140 and pr < 160 and pb > pr + 30:
             return True
-        # Magenta / pink
         if pr > 150 and pb > 150 and pg < 90:
             return True
-        # Light beige / tan
         if pr > 200 and pg > 185 and pb > 160 and brightness > 190:
-            return True
-        # Teal / cyan bg
-        if pg > 160 and pb > 150 and pr < 120:
             return True
         return False
 
-    # Seed from ALL edges
     stack = (
-        [(0, x) for x in range(w)] +
-        [(h-1, x) for x in range(w)] +
-        [(y, 0) for y in range(h)] +
-        [(y, w-1) for y in range(h)]
+        [(0,x) for x in range(w)] + [(h-1,x) for x in range(w)] +
+        [(y,0) for y in range(h)] + [(y,w-1) for y in range(h)]
     )
-
     while stack:
         py, px = stack.pop()
-        if py < 0 or py >= h or px < 0 or px >= w or visited[py, px]:
+        if py < 0 or py >= h or px < 0 or px >= w or visited[py,px]:
             continue
-        visited[py, px] = True
-        if is_bg_pixel(py, px):
-            bg_mask[py, px] = True
+        visited[py,px] = True
+        if is_bg(py, px):
+            bg_mask[py,px] = True
             stack += [(py-1,px),(py+1,px),(py,px-1),(py,px+1)]
 
     result = np.array(img, dtype=np.uint8)
