@@ -572,74 +572,144 @@ POSE_DESCRIPTIONS = {
 def build_spritesheet_ai(base_prompt: str, char_data: dict, animations: list,
                           fps: int, sprite_size: int, status_callback=None) -> tuple:
     """
-    Generate each animation frame as a separate AI image.
-    This is the AutoSprite approach — one image per pose per frame.
+    Hybrid approach:
+    1. Generate ONE clean AI base image per animation (5 images for 5 animations)
+    2. Use PIL to create frame variations (offset, flip, slight transforms)
+    This is fast (5 requests not 20), looks good, and won't timeout.
     """
-    import math
-    sz      = sprite_size
-    frames_per_anim = min(fps, 4)  # 4 unique AI frames per animation, then loop
-    sheet   = Image.new("RGBA", (sz * frames_per_anim, sz * len(animations)), (0,0,0,0))
-    atlas   = {"frames": {}, "meta": {"size": {"w": sz*frames_per_anim, "h": sz*len(animations)}}}
+    import math, time
+    import numpy as np
 
-    char_name = char_data.get("character_name", "character")
+    sz              = sprite_size
+    frames_per_anim = min(fps, 8)
+    sheet  = Image.new("RGBA", (sz * frames_per_anim, sz * len(animations)), (0,0,0,0))
+    atlas  = {"frames": {}, "meta": {"size": {"w": sz*frames_per_anim, "h": sz*len(animations)}}}
+
     species   = char_data.get("species", "")
     outfit    = char_data.get("outfit", "")
     palette   = char_data.get("color_palette", "")
     art_style = char_data.get("art_style", "pixel art 16-bit RPG")
-
-    # Core character description — stays consistent across all frames
-    char_desc = (
-        f"{art_style} sprite, {species} character, {outfit}, "
-        f"{palette}, side view, full body, "
-        f"SNES Chrono Trigger Final Fantasy 6 style, "
-        f"clean black pixel outlines, flat cel shading, "
-        f"pure white plain background, no scenery"
-    )
-
-    p1 = hex_to_rgba(char_data.get("color_primary", "#7c3aed"))
-    p2 = hex_to_rgba(char_data.get("color_secondary", "#ff6b35"))
-
-    import time
-    # Use a fixed base seed so character looks consistent across frames
+    lt        = char_data.get("living_type", "Human")
+    p1        = hex_to_rgba(char_data.get("color_primary", "#7c3aed"))
+    p2        = hex_to_rgba(char_data.get("color_secondary", "#ff6b35"))
     base_seed = abs(hash(char_data.get("character_name", "char"))) % 100000
 
+    # One base prompt per animation type
+    anim_poses = {
+        "idle":   "standing upright, relaxed neutral pose, arms at sides",
+        "walk":   "walking pose, one leg forward, arms swinging, mid-stride",
+        "run":    "running pose, leaning forward, both feet off ground, arms pumping",
+        "jump":   "jumping pose, knees bent, arms raised upward, airborne",
+        "attack": "attacking pose, weapon raised, lunging forward aggressively",
+        "hurt":   "recoiling pose, body jerking backward, arms raised defensively",
+        "die":    "falling pose, body collapsed, lying on ground",
+    }
+
+    char_base = (
+        f"{art_style}, {species} character, {outfit}, "
+        f"{palette}, side view, full body, "
+        f"SNES Chrono Trigger style, black pixel outlines, flat shading, "
+        f"plain white background, no scenery, no ground, isolated character"
+    )
+
     for ri, anim in enumerate(animations):
-        poses = POSE_DESCRIPTIONS.get(anim, POSE_DESCRIPTIONS["idle"])
-        for ci in range(frames_per_anim):
-            pose  = poses[ci % len(poses)]
-            # Vary seed slightly per frame so poses differ but character stays same
-            frame_seed = base_seed + (ri * 100) + ci
-            prompt = f"{char_desc}, {pose}"
+        if status_callback:
+            status_callback(f"🎨 Generating {anim} base image ({ri+1}/{len(animations)})...")
 
+        pose   = anim_poses.get(anim, "standing pose")
+        prompt = f"{char_base}, {pose}"
+        seed   = base_seed + ri * 7
+
+        base_img = fetch_frame(prompt, sz, seed=seed)
+        if base_img is None:
             if status_callback:
-                status_callback(f"  🎨 {anim} frame {ci+1}/{frames_per_anim} (seed {frame_seed})...")
+                status_callback(f"⚠️ {anim} — AI failed, using placeholder")
+            base_img = make_placeholder(sz, p1, p2, lt)
+        else:
+            if status_callback:
+                status_callback(f"✅ {anim} base image ready")
 
-            frame = fetch_frame(prompt, sz, seed=frame_seed)
-            if frame is None:
-                if status_callback:
-                    status_callback(f"  ⚠️ {anim} frame {ci+1} failed — using placeholder")
-                frame = make_placeholder(sz, p1, p2, char_data.get("living_type","Human"))
-            else:
-                if status_callback:
-                    status_callback(f"  ✅ {anim} frame {ci+1} — AI image received")
-
-            # Ensure exact size before pasting
+        # Generate frame variations from the base image using PIL transforms
+        for ci in range(frames_per_anim):
+            frame = _make_anim_variation(base_img, anim, ci, frames_per_anim, sz)
             if frame.size != (sz, sz):
                 frame = frame.resize((sz, sz), Image.NEAREST)
-
-            # Paste onto transparent background (in case frame has white bg remnants)
-            frame_canvas = Image.new("RGBA", (sz, sz), (0, 0, 0, 0))
-            frame_canvas.paste(frame, (0, 0))
-            sheet.paste(frame_canvas, (ci * sz, ri * sz))
+            sheet.paste(frame, (ci * sz, ri * sz))
             key = f"{anim}_{ci:02d}"
             atlas["frames"][key] = {
                 "frame": {"x": ci*sz, "y": ri*sz, "w": sz, "h": sz},
                 "animation": anim, "frame_index": ci,
             }
-            # Small delay between frames to avoid rate limiting
-            time.sleep(1)
+
+        # Small delay between animations (not between every frame)
+        if ri < len(animations) - 1:
+            time.sleep(2)
 
     return sheet, atlas, frames_per_anim
+
+
+def _make_anim_variation(base: Image.Image, anim: str, frame_idx: int,
+                          total: int, sz: int) -> Image.Image:
+    """
+    Create a frame variation by cleanly moving/transforming the whole sprite.
+    Never cuts or tears the image — whole-sprite compositing only.
+    """
+    import math
+    t     = frame_idx / max(total - 1, 1)
+    u     = max(1, sz // 20)
+    sin_t = math.sin(t * math.pi * 2)
+    pad   = sz // 6
+    canvas = Image.new("RGBA", (sz + pad*2, sz + pad*2), (0, 0, 0, 0))
+    ox, oy = pad, pad  # default offset
+
+    if anim == "idle":
+        oy += int(math.sin(t * math.pi * 2) * max(1, u // 2))
+
+    elif anim == "walk":
+        oy -= int(abs(sin_t) * u)
+        ox += int(sin_t * max(1, u // 2))
+
+    elif anim == "run":
+        oy -= int(abs(sin_t) * u * 2)
+        ox += int(sin_t * u)
+
+    elif anim == "jump":
+        if t < 0.2:
+            oy += int(u * (t / 0.2))
+        elif t < 0.6:
+            oy -= int(u * 4 * math.sin((t - 0.2) / 0.4 * math.pi))
+        else:
+            oy += int(u * (t - 0.6) / 0.4 * 2)
+
+    elif anim == "attack":
+        if t < 0.3:
+            ox -= int(u * (t / 0.3))
+        elif t < 0.6:
+            ox += int(u * 3 * ((t - 0.3) / 0.3))
+        else:
+            ox += int(u * 3 * (1 - (t - 0.6) / 0.4))
+
+    elif anim == "hurt":
+        ox -= int(u * 2 * (1 - t))
+        if t < 0.4:
+            red = Image.new("RGBA", (sz + pad*2, sz + pad*2),
+                            (255, 60, 60, int(120 * (1 - t/0.4))))
+            canvas.paste(base, (ox, oy), base)
+            canvas = Image.alpha_composite(canvas, red)
+            return canvas.crop((pad, pad, pad+sz, pad+sz))
+
+    elif anim == "die":
+        ox += int(t * sz * 0.3)
+        oy += int(t * sz * 0.2)
+        canvas.paste(base, (ox, oy), base)
+        alpha = max(0, int(255 * (1 - t * 1.3)))
+        r2,g2,b2,a2 = canvas.split()
+        a2 = a2.point(lambda p: int(p * alpha / 255))
+        canvas = Image.merge("RGBA", (r2,g2,b2,a2))
+        return canvas.crop((pad, pad, pad+sz, pad+sz))
+
+    canvas.paste(base, (ox, oy), base)
+    return canvas.crop((pad, pad, pad+sz, pad+sz))
 
 
 def build_gdscript(char_name, char_data, animations, sprite_size, fps):
