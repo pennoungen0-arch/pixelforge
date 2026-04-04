@@ -392,7 +392,7 @@ def make_placeholder(size, primary, secondary, living_type="Human"):
     od = ImageDraw.Draw(outline_img)
     # Simple 1-pixel outline by drawing shifted copies
     for ox2, oy2 in [(-u//4,0),(u//4,0),(0,-u//4),(0,u//4)]:
-        pix = img.getdata()
+        pix = list(img.getdata())
         shifted = Image.new("RGBA", (w, w), (0, 0, 0, 0))
         shifted.paste(img, (ox2, oy2))
         # Composite dark outline under the main image
@@ -405,56 +405,39 @@ def make_placeholder(size, primary, secondary, living_type="Human"):
 
     # Downscale to target size with NEAREST for pixel-crisp look
     return result.resize((size, size), Image.NEAREST)
-def hf_generate(prompt, size=64):
-    """Try multiple HF models in order until one works."""
-    models = [
-        ("black-forest-labs/FLUX.1-schnell", {"num_inference_steps": 4}),
-        ("stabilityai/stable-diffusion-xl-base-1.0", {}),
-        ("runwayml/stable-diffusion-v1-5", {}),
-    ]
+def generate_image(prompt, size=64):
+    """
+    Generate character image via Pollinations.ai — completely free, no key needed.
+    Falls back to placeholder if unavailable.
+    """
     pixel_prompt = (
-        f"pixel art, 16-bit RPG sprite, side view, full body character, "
+        f"pixel art 16-bit RPG character sprite, side view, full body, "
         f"{prompt}, "
-        f"SNES style, classic RPG, clean outlines, flat colors, "
-        f"Final Fantasy 6 style, Chrono Trigger style, "
-        f"white background, centered, no background clutter"
+        f"SNES style, Chrono Trigger style, Final Fantasy 6 style, "
+        f"clean black outlines, flat shading, limited color palette, "
+        f"white background, centered character, no background"
     )
-    neg = "blurry, 3d, realistic, photo, modern, deformed, extra limbs, bad anatomy, low quality"
-    headers = {"Authorization": f"Bearer {HF_KEY}"} if HF_KEY else {}
-
-    for model, extra_params in models:
-        try:
-            payload = {
-                "inputs": pixel_prompt,
-                "parameters": {
-                    "width": 512, "height": 512,
-                    "negative_prompt": neg,
-                    **extra_params
-                }
-            }
-            r = requests.post(
-                f"https://api-inference.huggingface.co/models/{model}",
-                headers=headers,
-                json=payload,
-                timeout=60,
-            )
-            if r.status_code == 200 and "image" in r.headers.get("content-type", ""):
-                img = Image.open(io.BytesIO(r.content)).convert("RGBA")
-                # Remove white/near-white background
-                img = remove_white_bg(img)
-                # Pixelate to target size then scale back for crisp look
-                small = img.resize((size, size), Image.LANCZOS)
-                return small
-            elif r.status_code == 503:
-                continue  # model loading, try next
-        except:
-            continue
+    import urllib.parse
+    encoded = urllib.parse.quote(pixel_prompt)
+    # Pollinations generates at 512x512, we downscale to sprite size
+    url = f"https://image.pollinations.ai/prompt/{encoded}?width=512&height=512&nologo=true&model=flux"
+    try:
+        r = requests.get(url, timeout=60)
+        if r.status_code == 200 and "image" in r.headers.get("content-type", ""):
+            img = Image.open(io.BytesIO(r.content)).convert("RGBA")
+            img = remove_white_bg(img)
+            # Downscale with LANCZOS for smooth result, then nearest for pixel crispness
+            img = img.resize((size * 4, size * 4), Image.LANCZOS)
+            img = img.resize((size, size), Image.NEAREST)
+            return img
+    except:
+        pass
     return None
 
 def remove_white_bg(img: Image.Image, threshold=240) -> Image.Image:
     """Make white/near-white pixels transparent."""
     img = img.convert("RGBA")
-    data = img.getdata()
+    data = list(img.getdata())
     new_data = []
     for r, g, b, a in data:
         if r > threshold and g > threshold and b > threshold:
@@ -855,7 +838,7 @@ Return ONLY valid JSON, no markdown:
 
             if mode == "full":
                 st.write(f"🎨 Generating sprite ({sprite_size}px)...")
-                img = hf_generate(data.get("image_prompt","pixel art RPG character"), size=sprite_size)
+                img = generate_image(data.get("image_prompt","pixel art RPG character"), size=sprite_size)
                 if img is None:
                     st.write("⚠️ HF unavailable — using RPG pixel placeholder")
                     img = make_placeholder(sprite_size, p1, p2, lt)
@@ -871,7 +854,7 @@ Return ONLY valid JSON, no markdown:
                     st.write(f"  ▸ {part}...")
                     pdesc  = modular.get(part, f"{part} for {data.get('species','character')}")
                     pprmt  = f"{data.get('art_style','pixel art')} {pdesc}, {data.get('color_palette','')}"
-                    pimg   = hf_generate(pprmt, size=part_size)
+                    pimg   = generate_image(pprmt, size=part_size)
                     if pimg is None:
                         pimg = make_placeholder(sprite_size, p1, p2, lt)
                     else:
@@ -948,7 +931,7 @@ with right:
                     # Dark bg for visibility
                     bg = Image.new("RGBA", (disp, disp), (13, 13, 26, 255))
                     bg.paste(display_img, (0,0), display_img)
-                    st.image(bg, caption=f"{cn} — {sz}×{sz}px sprite", use_container_width=True)
+                    st.image(bg, caption=f"{cn} — {sz}×{sz}px sprite", width="stretch")
 
                 with cs:
                     p1h = d.get("color_primary", "#00ffcc")
@@ -987,7 +970,7 @@ with right:
                             bg = Image.new("RGBA", (disp, disp), (13,13,26,255))
                             d_img = pimg.resize((disp, disp), Image.NEAREST)
                             bg.paste(d_img, (0,0), d_img)
-                            st.image(bg, caption=pname, use_container_width=True)
+                            st.image(bg, caption=pname, width="stretch")
                             st.download_button(f"⬇️ {pname}", to_bytes(pimg),
                                                f"{cn.replace(' ','_')}_{pname}.png", "image/png",
                                                key=f"dl_{pname}", use_container_width=True)
@@ -1006,7 +989,7 @@ with right:
                 ds    = sheet.resize((sheet.width*scale, sheet.height*scale), Image.NEAREST)
                 bg    = Image.new("RGBA", ds.size, (13,13,26,255))
                 bg.paste(ds, (0,0), ds)
-                st.image(bg, caption="Full spritesheet", use_container_width=True)
+                st.image(bg, caption="Full spritesheet", width="stretch")
 
                 st.markdown("**Rows:** " + " ".join([
                     f'<span class="result-tag">{i}: {a}</span>' for i,a in enumerate(anims)
