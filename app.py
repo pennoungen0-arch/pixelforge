@@ -391,118 +391,113 @@ func play(anim: String) -> void:
 '''
 
 # ── Background generation thread ──────────────────────────────────────────────
-def _paste(canvas, img, ox, oy):
-    try: canvas.paste(img, (ox, oy), img)
-    except: canvas.paste(img, (ox, oy))
-
 def _anim_frame(base: Image.Image, anim: str, frame_idx: int, total: int) -> Image.Image:
     """
-    Anatomically correct animation by splitting sprite into 4 body regions
-    and moving them independently with PIL crop+paste.
-    head=top 25%, upper=25-55%, lower=55-78%, feet=78-100%
+    Animation using full-sprite compositing.
+    We NEVER split the body into separate pieces.
+    Instead we paste the FULL sprite at an offset, then mask/overlay
+    specific regions to create the illusion of limb movement.
+    This avoids gaps, seams, and torn-apart looks.
     """
     sz    = base.width
     t     = frame_idx / max(total - 1, 1)
-    u     = max(1, sz // 16)
+    u     = max(1, sz // 20)
     sin_t = math.sin(t * math.pi * 2)
-    pad   = sz // 3
+    pad   = sz // 4
 
-    h1, h2, h3, h4 = int(sz*.25), int(sz*.55), int(sz*.78), sz
-    head  = base.crop((0,  0, sz, h1))
-    upper = base.crop((0, h1, sz, h2))
-    lower = base.crop((0, h2, sz, h3))
-    feet  = base.crop((0, h3, sz, h4))
+    W, H  = sz + pad*2, sz + pad*2
+    bx, by = pad, pad
 
-    W, H = sz+pad*2, sz+pad*2
-    bx = pad
-    bh, bu, bl, bf = pad, pad+h1, pad+h2, pad+h3
-
-    def comp(layers):
-        c = Image.new("RGBA",(W,H),(0,0,0,0))
-        for img,x,y in layers: _paste(c,img,x,y)
+    def make(ox=0, oy=0, alpha=255, flip_x=False):
+        """Paste full sprite at offset, optional alpha."""
+        c   = Image.new("RGBA",(W,H),(0,0,0,0))
+        img = base.transpose(Image.FLIP_LEFT_RIGHT) if flip_x else base
+        c.paste(img,(bx+ox, by+oy), img)
+        if alpha < 255:
+            r2,g2,b2,a2 = c.split()
+            a2 = a2.point(lambda p: int(p*alpha/255))
+            c  = Image.merge("RGBA",(r2,g2,b2,a2))
         return c.crop((pad,pad,pad+sz,pad+sz))
+
+    def overlay_red(base_frame, intensity):
+        """Overlay red tint on a frame."""
+        red = Image.new("RGBA", base_frame.size, (255,50,50,intensity))
+        return Image.alpha_composite(base_frame, red)
 
     if anim == "idle":
-        b = int(math.sin(t*math.pi*2) * max(1,u//3))
-        return comp([(head,bx,bh+b),(upper,bx,bu+b),(lower,bx,bl),(feet,bx,bf)])
+        # Gentle bob — whole sprite, very subtle
+        bob = int(math.sin(t * math.pi * 2) * max(1, u // 3))
+        return make(oy=bob)
 
     elif anim == "walk":
-        swing = int(sin_t*u*1.5)
-        bob   = int(abs(sin_t)*u)
-        lean  = int(sin_t*max(1,u//3))
-        return comp([
-            (head, bx+lean, bh-bob),(upper,bx+lean,bu-bob),
-            (lower,bx,bl),(feet,bx,bf+swing)])
+        # Step: alternate lean left/right + bob up on each step
+        bob  = int(abs(sin_t) * u)
+        lean = int(sin_t * max(1, u // 2))
+        return make(ox=lean, oy=-bob)
 
     elif anim == "run":
-        swing = int(sin_t*u*3)
-        bob   = int(abs(sin_t)*u*2)
-        lean  = int(sin_t*u)
-        return comp([
-            (head,bx+lean,bh-bob),(upper,bx+lean,bu-bob),
-            (lower,bx,bl),(feet,bx+lean//2,bf+swing)])
+        # Run: bigger lean + more aggressive bob
+        bob  = int(abs(sin_t) * u * 2)
+        lean = int(sin_t * u)
+        return make(ox=lean, oy=-bob)
 
     elif anim == "jump":
-        if t < 0.15:
-            cr = int(u*3*(t/0.15))
-            return comp([(head,bx,bh+cr),(upper,bx,bu+cr),(lower,bx,bl+cr//2),(feet,bx,bf)])
-        elif t < 0.5:
-            p    = (t-0.15)/0.35
-            rise = int(u*8*math.sin(p*math.pi*0.5))
-            ext  = int(u*2*p)
-            return comp([
-                (head,bx,bh-rise),(upper,bx,bu-rise),
-                (lower,bx,bl-rise+ext),(feet,bx,bf-rise+ext*2)])
-        elif t < 0.7:
-            p    = (t-0.5)/0.2
-            pr   = int(u*8)
-            tuck = int(u*4*p)
-            return comp([
-                (head,bx,bh-pr),(upper,bx,bu-pr),
-                (lower,bx,bl-pr+tuck),(feet,bx,bf-pr+tuck*2)])
+        # Proper jump arc — crouch → launch → peak → land
+        if t < 0.12:
+            # Crouch: squat down
+            squat = int(u * 2 * (t / 0.12))
+            return make(oy=squat)
+        elif t < 0.45:
+            # Launch: rapid rise
+            progress = (t - 0.12) / 0.33
+            rise = int(u * 9 * math.sin(progress * math.pi * 0.7))
+            return make(oy=-rise)
+        elif t < 0.65:
+            # Peak: hold at top, slight tilt forward
+            lean = int(u * 1.5 * ((t - 0.45) / 0.2))
+            return make(ox=lean, oy=-int(u*9))
         else:
-            p    = (t-0.7)/0.3
-            fall = int(u*8*p)
-            ext  = int(u*3*p)
-            sq   = int(u*2*p)
-            return comp([
-                (head,bx,bh-u*8+fall+sq),(upper,bx,bu-u*8+fall+sq),
-                (lower,bx,bl-u*8+fall+ext),(feet,bx,bf-u*8+fall+ext*2)])
+            # Fall + land impact
+            progress = (t - 0.65) / 0.35
+            fall = int(u * 9 * progress)
+            # Squish on landing
+            return make(ox=int(u*1.5), oy=-int(u*9)+fall)
 
     elif anim == "attack":
-        if t < 0.2:
-            w = int(u*2*(t/0.2))
-            return comp([(head,bx-w,bh),(upper,bx-w,bu),(lower,bx,bl),(feet,bx,bf)])
-        elif t < 0.5:
-            p = (t-0.2)/0.3
-            lg = int(u*5*p)
-            return comp([(head,bx+lg-u*2,bh),(upper,bx+lg,bu),(lower,bx+lg//2,bl),(feet,bx,bf)])
+        if t < 0.15:
+            # Wind-up: pull back
+            pull = int(u * 2 * (t / 0.15))
+            return make(ox=-pull)
+        elif t < 0.45:
+            # Strike: explosive lunge forward
+            progress = (t - 0.15) / 0.30
+            lunge    = int(u * 5 * progress)
+            return make(ox=lunge)
+        elif t < 0.65:
+            # Hold extension
+            return make(ox=int(u * 5))
         else:
-            p  = (t-0.5)/0.5
-            lg = int(u*5*(1-p))
-            return comp([(head,bx+lg-u,bh),(upper,bx+lg,bu),(lower,bx+lg//3,bl),(feet,bx,bf)])
+            # Recover
+            progress = (t - 0.65) / 0.35
+            lunge    = int(u * 5 * (1 - progress))
+            return make(ox=lunge)
 
     elif anim == "hurt":
-        kb = int(u*4*(1-t))
-        c  = Image.new("RGBA",(W,H),(0,0,0,0))
-        for img,x,y in [(head,bx-kb,bh),(upper,bx-kb,bu),(lower,bx-kb,bl),(feet,bx-kb,bf)]:
-            _paste(c,img,x,y)
+        knockback = int(u * 4 * (1 - t))
+        frame = make(ox=-knockback)
         if t < 0.5:
-            red = Image.new("RGBA",(W,H),(255,50,50,int(180*(1-t*2))))
-            c   = Image.alpha_composite(c,red)
-        return c.crop((pad,pad,pad+sz,pad+sz))
+            intensity = int(160 * (1 - t * 2))
+            frame = overlay_red(frame, intensity)
+        return frame
 
     elif anim == "die":
-        fx,fy = int(t*sz*.4), int(t*sz*.3)
-        al    = max(0,int(255*(1-t*1.3)))
-        c     = Image.new("RGBA",(W,H),(0,0,0,0))
-        for img,x,y in [(head,bx+fx,bh+fy),(upper,bx+fx,bu+fy),(lower,bx+fx+fx//3,bl+fy*2),(feet,bx+fx+fx//2,bf+fy*3)]:
-            _paste(c,img,x,y)
-        r2,g2,b2,a2 = c.split()
-        a2 = a2.point(lambda p: int(p*al/255))
-        return Image.merge("RGBA",(r2,g2,b2,a2)).crop((pad,pad,pad+sz,pad+sz))
+        # Fall sideways with fade
+        fall_x = int(t * sz * 0.35)
+        fall_y = int(t * sz * 0.2)
+        alpha  = max(0, int(255 * (1 - t * 1.3)))
+        return make(ox=fall_x, oy=fall_y, alpha=alpha)
 
-    return comp([(base,bx,pad)])
+    return make()
 
 def run_generation(char_data, animations, sprite_size, fps, result_store):
     """
