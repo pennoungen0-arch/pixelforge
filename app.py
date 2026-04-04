@@ -482,79 +482,45 @@ def remove_bg(img: Image.Image) -> Image.Image:
     return Image.fromarray(res, "RGBA")
 
 
-def fetch_frame(prompt: str, size: int) -> Image.Image | None:
+def fetch_frame(prompt: str, size: int, seed: int = 0) -> Image.Image | None:
     """
-    Fetch one sprite frame. Tries multiple sources in order:
-    1. Hugging Face - stabilityai/stable-diffusion-2 (good at following prompts)
-    2. Pollinations with aggressive rembg removal
-    3. None (caller uses placeholder)
+    Fetch one sprite frame from Pollinations with retry + seed for consistency.
+    Seed keeps character appearance consistent across all animation frames.
     """
-    import urllib.parse
+    import urllib.parse, time
     import numpy as np
 
-    # ── Option 1: HuggingFace Inference API ──────────────────────────────────
-    # Works well with white background prompts and produces cleaner sprites
-    hf_prompt = (
-        f"pixel art sprite, {prompt}, "
-        f"white background, isolated character, no environment, no scenery, "
-        f"SNES style, 16-bit, clean outlines"
-    )
-    neg_prompt = "background, scenery, environment, sky, ground, trees, buildings, realistic, 3d, blurry"
-
-    hf_models = [
-        "stabilityai/stable-diffusion-2",
-        "stabilityai/stable-diffusion-xl-base-1.0",
-    ]
-    hf_headers = {"Authorization": f"Bearer {HF_KEY}"} if HF_KEY else {}
-
-    for model in hf_models:
-        try:
-            r = requests.post(
-                f"https://api-inference.huggingface.co/models/{model}",
-                headers=hf_headers,
-                json={
-                    "inputs": hf_prompt,
-                    "parameters": {
-                        "negative_prompt": neg_prompt,
-                        "width": 512, "height": 512,
-                        "num_inference_steps": 20,
-                        "guidance_scale": 7.5,
-                    }
-                },
-                timeout=60,
-            )
-            if r.status_code == 200 and "image" in r.headers.get("content-type", ""):
-                img = Image.open(io.BytesIO(r.content)).convert("RGBA")
-                img = remove_bg(img)
-                visible = (np.array(img)[:,:,3] > 10).sum()
-                if visible > 500:
-                    return img.resize((size, size), Image.NEAREST)
-        except Exception:
-            continue
-
-    # ── Option 2: Pollinations ────────────────────────────────────────────────
     poll_prompt = (
         f"pixel art 16-bit RPG character sprite, {prompt}, "
-        f"SNES Chrono Trigger style, black outlines, flat shading, "
-        f"plain white background, character only"
+        f"SNES Chrono Trigger Final Fantasy 6 style, "
+        f"black pixel outlines, flat cel shading, limited color palette, "
+        f"plain white background, character only, no scenery, no ground"
     )
     encoded = urllib.parse.quote(poll_prompt)
-    for model in ["flux", "turbo"]:
-        url = (f"https://image.pollinations.ai/prompt/{encoded}"
-               f"?width=512&height=512&nologo=true&model={model}&enhance=false")
+
+    for attempt in range(3):
+        if attempt > 0:
+            time.sleep(4)
+        url = (
+            f"https://image.pollinations.ai/prompt/{encoded}"
+            f"?width=512&height=512&nologo=true&model=flux"
+            f"&enhance=false&seed={seed}"
+        )
         try:
             r = requests.get(url, timeout=90)
-            if r.status_code == 200 and "image" in r.headers.get("content-type", ""):
-                img = Image.open(io.BytesIO(r.content)).convert("RGBA")
-                img = remove_bg(img)
-                visible = (np.array(img)[:,:,3] > 10).sum()
-                if visible > 500:
-                    return img.resize((size, size), Image.NEAREST)
+            if r.status_code == 200 and "image" in r.headers.get("content-type",""):
+                raw_bytes = r.content
+                img = Image.open(io.BytesIO(raw_bytes)).convert("RGBA")
+                cleaned = remove_bg(img)
+                visible = (np.array(cleaned)[:,:,3] > 10).sum()
+                if visible > (size * size * 0.04):
+                    return cleaned.resize((size, size), Image.NEAREST)
+                # rembg removed too much — return without bg removal
+                # (better to have background than invisible character)
+                return img.resize((size, size), Image.NEAREST)
         except Exception:
             continue
-
     return None
-
 
 # Pose descriptions for each animation frame
 POSE_DESCRIPTIONS = {
@@ -633,17 +599,25 @@ def build_spritesheet_ai(base_prompt: str, char_data: dict, animations: list,
     p1 = hex_to_rgba(char_data.get("color_primary", "#7c3aed"))
     p2 = hex_to_rgba(char_data.get("color_secondary", "#ff6b35"))
 
+    import time
+    # Use a fixed base seed so character looks consistent across frames
+    base_seed = abs(hash(char_data.get("character_name", "char"))) % 100000
+
     for ri, anim in enumerate(animations):
         poses = POSE_DESCRIPTIONS.get(anim, POSE_DESCRIPTIONS["idle"])
         for ci in range(frames_per_anim):
-            pose = poses[ci % len(poses)]
+            pose  = poses[ci % len(poses)]
+            # Vary seed slightly per frame so poses differ but character stays same
+            frame_seed = base_seed + (ri * 100) + ci
             prompt = f"{char_desc}, {pose}"
 
             if status_callback:
-                status_callback(f"  🎨 {anim} frame {ci+1}/{frames_per_anim}...")
+                status_callback(f"  🎨 {anim} frame {ci+1}/{frames_per_anim} (seed {frame_seed})...")
 
-            frame = fetch_frame(prompt, sz)
+            frame = fetch_frame(prompt, sz, seed=frame_seed)
             if frame is None:
+                if status_callback:
+                    status_callback(f"  ⚠️ {anim} frame {ci+1} failed — using placeholder")
                 frame = make_placeholder(sz, p1, p2, char_data.get("living_type","Human"))
 
             sheet.paste(frame, (ci * sz, ri * sz))
@@ -652,6 +626,8 @@ def build_spritesheet_ai(base_prompt: str, char_data: dict, animations: list,
                 "frame": {"x": ci*sz, "y": ri*sz, "w": sz, "h": sz},
                 "animation": anim, "frame_index": ci,
             }
+            # Small delay between frames to avoid rate limiting
+            time.sleep(1)
 
     return sheet, atlas, frames_per_anim
 
