@@ -921,21 +921,236 @@ with right:
         # ── Preview ────────────────────────────────────────────────────────────
         with t1:
             if "full" in st.session_state.generated_images:
-                img  = st.session_state.generated_images["full"]
-                sz   = img.width
-                disp = min(sz * 8, 480)
-                display_img = img.resize((disp, disp), Image.NEAREST)
+                img     = st.session_state.generated_images["full"]
+                sz      = img.width
+                anims   = st.session_state.get("selected_anims", ["idle"])
+                fps_val = st.session_state.get("fps", 8)
+                sheet   = st.session_state.final_sheet
+                p1h     = d.get("color_primary", "#00ffcc")
+                p2h     = d.get("color_secondary", "#ff6b35")
 
-                ci, cs = st.columns([1, 1])
-                with ci:
-                    # Dark bg for visibility
-                    bg = Image.new("RGBA", (disp, disp), (13, 13, 26, 255))
-                    bg.paste(display_img, (0,0), display_img)
-                    st.image(bg, caption=f"{cn} — {sz}×{sz}px sprite", width="stretch")
+                prev_col, info_col = st.columns([1, 1])
 
-                with cs:
-                    p1h = d.get("color_primary", "#00ffcc")
-                    p2h = d.get("color_secondary", "#ff6b35")
+                with prev_col:
+                    # Build animated preview HTML from spritesheet frames
+                    if sheet and anims:
+                        # Extract all frames for all animations as base64
+                        frames_b64 = {}
+                        for ri, anim in enumerate(anims):
+                            frames_b64[anim] = []
+                            for ci2 in range(fps_val):
+                                x = ci2 * sz
+                                y = ri * sz
+                                frame = sheet.crop((x, y, x + sz, y + sz))
+                                # Scale up for display
+                                disp_sz = min(sz * 6, 384)
+                                frame_disp = frame.resize((disp_sz, disp_sz), Image.NEAREST)
+                                # Add dark bg
+                                bg_f = Image.new("RGBA", (disp_sz, disp_sz), (13, 13, 26, 255))
+                                bg_f.paste(frame_disp, (0, 0), frame_disp)
+                                buf = io.BytesIO()
+                                bg_f.save(buf, format="PNG")
+                                frames_b64[anim].append(base64.b64encode(buf.getvalue()).decode())
+
+                        # Build frames JSON for JS
+                        import json as _json
+                        frames_json = _json.dumps(frames_b64)
+                        anims_json  = _json.dumps(anims)
+                        fps_json    = fps_val
+
+                        preview_html = f"""
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+  * {{ margin:0; padding:0; box-sizing:border-box; }}
+  body {{ background:#0a0a0f; font-family:'Courier New',monospace; color:#e2e8f0; }}
+  #viewer {{
+    display:flex; flex-direction:column; align-items:center;
+    gap:12px; padding:16px;
+  }}
+  #canvas-wrap {{
+    position:relative;
+    background: repeating-conic-gradient(#1a1a28 0% 25%, #12121a 0% 50%) 0 0 / 16px 16px;
+    border:2px solid #2a2a40; border-radius:4px;
+    display:flex; align-items:center; justify-content:center;
+    width:200px; height:200px;
+  }}
+  #sprite {{ image-rendering:pixelated; width:180px; height:180px; }}
+  #controls {{
+    display:flex; flex-direction:column; align-items:center; gap:8px; width:100%;
+  }}
+  #anim-btns {{
+    display:flex; flex-wrap:wrap; gap:4px; justify-content:center;
+  }}
+  .anim-btn {{
+    padding:3px 10px;
+    background:#1a1a28; border:1px solid #2a2a40;
+    color:#64748b; font-size:10px; font-family:'Courier New',monospace;
+    cursor:pointer; border-radius:2px; letter-spacing:1px;
+    text-transform:uppercase;
+  }}
+  .anim-btn.active {{
+    border-color:#00ffcc; color:#00ffcc;
+    background:rgba(0,255,204,0.08);
+    box-shadow:0 0 6px rgba(0,255,204,0.2);
+  }}
+  #playbar {{
+    display:flex; align-items:center; gap:8px;
+  }}
+  .ctrl-btn {{
+    width:30px; height:30px;
+    background:#1a1a28; border:1px solid #2a2a40;
+    color:#00ffcc; font-size:14px; cursor:pointer;
+    border-radius:2px; display:flex; align-items:center; justify-content:center;
+  }}
+  .ctrl-btn:hover {{ background:rgba(0,255,204,0.1); }}
+  #fps-label {{ font-size:10px; color:#64748b; }}
+  #frame-counter {{ font-size:10px; color:#2a2a40; }}
+  input[type=range] {{
+    -webkit-appearance:none; width:80px; height:3px;
+    background:#2a2a40; border-radius:2px; outline:none;
+  }}
+  input[type=range]::-webkit-slider-thumb {{
+    -webkit-appearance:none; width:12px; height:12px;
+    background:#00ffcc; border-radius:0; cursor:pointer;
+  }}
+  #scale-btns {{ display:flex; gap:4px; }}
+  .scale-btn {{
+    padding:2px 6px; background:#1a1a28; border:1px solid #2a2a40;
+    color:#64748b; font-size:9px; cursor:pointer; border-radius:2px;
+  }}
+  .scale-btn.active {{ border-color:#a855f7; color:#a855f7; }}
+</style>
+</head>
+<body>
+<div id="viewer">
+  <div id="canvas-wrap">
+    <img id="sprite" src="" alt="sprite"/>
+  </div>
+  <div id="controls">
+    <div id="anim-btns"></div>
+    <div id="playbar">
+      <button class="ctrl-btn" id="prev-btn">&#9664;</button>
+      <button class="ctrl-btn" id="play-btn">&#9646;&#9646;</button>
+      <button class="ctrl-btn" id="next-btn">&#9654;</button>
+      <span id="fps-label">FPS:</span>
+      <input type="range" id="fps-slider" min="1" max="24" value="{fps_json}"/>
+      <span id="fps-val">{fps_json}</span>
+      <span id="frame-counter">0/0</span>
+    </div>
+    <div id="scale-btns">
+      <button class="scale-btn" data-scale="1">1x</button>
+      <button class="scale-btn active" data-scale="2">2x</button>
+      <button class="scale-btn" data-scale="3">3x</button>
+      <button class="scale-btn" data-scale="4">4x</button>
+    </div>
+  </div>
+</div>
+<script>
+const ALL_FRAMES = {frames_json};
+const ANIM_LIST  = {anims_json};
+
+let currentAnim  = ANIM_LIST[0];
+let currentFrame = 0;
+let playing      = true;
+let fps          = {fps_json};
+let scale        = 2;
+let timer        = null;
+
+const spriteEl   = document.getElementById("sprite");
+const playBtn    = document.getElementById("play-btn");
+const counter    = document.getElementById("frame-counter");
+const fpsSlider  = document.getElementById("fps-slider");
+const fpsVal     = document.getElementById("fps-val");
+const animBtns   = document.getElementById("anim-btns");
+const canvasWrap = document.getElementById("canvas-wrap");
+
+// Build animation buttons
+ANIM_LIST.forEach(anim => {{
+  const btn = document.createElement("button");
+  btn.className = "anim-btn" + (anim === currentAnim ? " active" : "");
+  btn.textContent = anim;
+  btn.onclick = () => {{
+    currentAnim = anim;
+    currentFrame = 0;
+    document.querySelectorAll(".anim-btn").forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+    showFrame();
+  }};
+  animBtns.appendChild(btn);
+}});
+
+// Scale buttons
+document.querySelectorAll(".scale-btn").forEach(btn => {{
+  btn.onclick = () => {{
+    scale = parseInt(btn.dataset.scale);
+    document.querySelectorAll(".scale-btn").forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+    const s = Math.min(scale * 64, 180);
+    spriteEl.style.width = s + "px";
+    spriteEl.style.height = s + "px";
+  }};
+}});
+
+function showFrame() {{
+  const frames = ALL_FRAMES[currentAnim] || [];
+  if (!frames.length) return;
+  spriteEl.src = "data:image/png;base64," + frames[currentFrame % frames.length];
+  counter.textContent = (currentFrame + 1) + "/" + frames.length;
+}}
+
+function nextFrame() {{
+  const frames = ALL_FRAMES[currentAnim] || [];
+  currentFrame = (currentFrame + 1) % Math.max(frames.length, 1);
+  showFrame();
+}}
+
+function startPlay() {{
+  if (timer) clearInterval(timer);
+  timer = setInterval(nextFrame, 1000 / fps);
+}}
+
+function stopPlay() {{
+  if (timer) {{ clearInterval(timer); timer = null; }}
+}}
+
+playBtn.onclick = () => {{
+  playing = !playing;
+  playBtn.innerHTML = playing ? "&#9646;&#9646;" : "&#9654;";
+  playing ? startPlay() : stopPlay();
+}};
+
+document.getElementById("prev-btn").onclick = () => {{
+  const frames = ALL_FRAMES[currentAnim] || [];
+  currentFrame = (currentFrame - 1 + frames.length) % Math.max(frames.length, 1);
+  showFrame();
+}};
+
+document.getElementById("next-btn").onclick = () => {{ nextFrame(); }};
+
+fpsSlider.oninput = () => {{
+  fps = parseInt(fpsSlider.value);
+  fpsVal.textContent = fps;
+  if (playing) startPlay();
+}};
+
+// Init
+showFrame();
+if (playing) startPlay();
+</script>
+</body>
+</html>"""
+                        st.components.v1.html(preview_html, height=380, scrolling=False)
+                    else:
+                        # Static fallback
+                        disp_sz = min(sz * 6, 384)
+                        display_img = img.resize((disp_sz, disp_sz), Image.NEAREST)
+                        bg = Image.new("RGBA", (disp_sz, disp_sz), (13, 13, 26, 255))
+                        bg.paste(display_img, (0,0), display_img)
+                        st.image(bg, caption=f"{cn} — {sz}×{sz}px", width="stretch")
+
+                with info_col:
                     st.markdown(f"""
                     <div style="margin-bottom:12px;display:flex;gap:8px;align-items:center">
                         <div style="width:28px;height:28px;background:{p1h};border:1px solid #444;border-radius:2px"></div>
@@ -949,6 +1164,9 @@ with right:
                         ("Palette",  "color_palette"),
                     ]:
                         st.markdown(f"**{label}:** {d.get(key,'—')}")
+
+                    st.write("")
+                    st.caption("🎮 Animation controls: pick animation row, play/pause, step frame by frame, adjust FPS and scale")
 
                 st.download_button("⬇️ DOWNLOAD SPRITE PNG", to_bytes(img),
                                    f"{cn.replace(' ','_')}_sprite.png", "image/png",
