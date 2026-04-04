@@ -391,59 +391,118 @@ func play(anim: String) -> void:
 '''
 
 # ── Background generation thread ──────────────────────────────────────────────
+def _paste(canvas, img, ox, oy):
+    try: canvas.paste(img, (ox, oy), img)
+    except: canvas.paste(img, (ox, oy))
+
 def _anim_frame(base: Image.Image, anim: str, frame_idx: int, total: int) -> Image.Image:
-    """Move whole sprite cleanly per animation frame — no cuts, no tears."""
+    """
+    Anatomically correct animation by splitting sprite into 4 body regions
+    and moving them independently with PIL crop+paste.
+    head=top 25%, upper=25-55%, lower=55-78%, feet=78-100%
+    """
     sz    = base.width
     t     = frame_idx / max(total - 1, 1)
-    u     = max(1, sz // 20)
+    u     = max(1, sz // 16)
     sin_t = math.sin(t * math.pi * 2)
-    pad   = sz // 5
-    canvas = Image.new("RGBA", (sz + pad*2, sz + pad*2), (0,0,0,0))
-    ox, oy = pad, pad
+    pad   = sz // 3
+
+    h1, h2, h3, h4 = int(sz*.25), int(sz*.55), int(sz*.78), sz
+    head  = base.crop((0,  0, sz, h1))
+    upper = base.crop((0, h1, sz, h2))
+    lower = base.crop((0, h2, sz, h3))
+    feet  = base.crop((0, h3, sz, h4))
+
+    W, H = sz+pad*2, sz+pad*2
+    bx = pad
+    bh, bu, bl, bf = pad, pad+h1, pad+h2, pad+h3
+
+    def comp(layers):
+        c = Image.new("RGBA",(W,H),(0,0,0,0))
+        for img,x,y in layers: _paste(c,img,x,y)
+        return c.crop((pad,pad,pad+sz,pad+sz))
 
     if anim == "idle":
-        oy += int(math.sin(t * math.pi * 2) * max(1, u // 2))
+        b = int(math.sin(t*math.pi*2) * max(1,u//3))
+        return comp([(head,bx,bh+b),(upper,bx,bu+b),(lower,bx,bl),(feet,bx,bf)])
+
     elif anim == "walk":
-        oy -= int(abs(sin_t) * u * 1.5)
-        ox += int(sin_t * max(1, u // 2))
+        swing = int(sin_t*u*1.5)
+        bob   = int(abs(sin_t)*u)
+        lean  = int(sin_t*max(1,u//3))
+        return comp([
+            (head, bx+lean, bh-bob),(upper,bx+lean,bu-bob),
+            (lower,bx,bl),(feet,bx,bf+swing)])
+
     elif anim == "run":
-        oy -= int(abs(sin_t) * u * 3)
-        ox += int(sin_t * u)
+        swing = int(sin_t*u*3)
+        bob   = int(abs(sin_t)*u*2)
+        lean  = int(sin_t*u)
+        return comp([
+            (head,bx+lean,bh-bob),(upper,bx+lean,bu-bob),
+            (lower,bx,bl),(feet,bx+lean//2,bf+swing)])
+
     elif anim == "jump":
         if t < 0.15:
-            oy += int(u * 1.5 * (t / 0.15))
-        elif t < 0.55:
-            oy -= int(u * 7 * math.sin((t - 0.15) / 0.4 * math.pi))
-        elif t < 0.75:
-            oy -= int(u * 3 * (1 - (t - 0.55) / 0.2))
-    elif anim == "attack":
-        if t < 0.25:
-            ox -= int(u * 1.5 * (t / 0.25))
-        elif t < 0.55:
-            ox += int(u * 4 * ((t - 0.25) / 0.3))
+            cr = int(u*3*(t/0.15))
+            return comp([(head,bx,bh+cr),(upper,bx,bu+cr),(lower,bx,bl+cr//2),(feet,bx,bf)])
+        elif t < 0.5:
+            p    = (t-0.15)/0.35
+            rise = int(u*8*math.sin(p*math.pi*0.5))
+            ext  = int(u*2*p)
+            return comp([
+                (head,bx,bh-rise),(upper,bx,bu-rise),
+                (lower,bx,bl-rise+ext),(feet,bx,bf-rise+ext*2)])
+        elif t < 0.7:
+            p    = (t-0.5)/0.2
+            pr   = int(u*8)
+            tuck = int(u*4*p)
+            return comp([
+                (head,bx,bh-pr),(upper,bx,bu-pr),
+                (lower,bx,bl-pr+tuck),(feet,bx,bf-pr+tuck*2)])
         else:
-            ox += int(u * 4 * (1 - (t - 0.55) / 0.45))
+            p    = (t-0.7)/0.3
+            fall = int(u*8*p)
+            ext  = int(u*3*p)
+            sq   = int(u*2*p)
+            return comp([
+                (head,bx,bh-u*8+fall+sq),(upper,bx,bu-u*8+fall+sq),
+                (lower,bx,bl-u*8+fall+ext),(feet,bx,bf-u*8+fall+ext*2)])
+
+    elif anim == "attack":
+        if t < 0.2:
+            w = int(u*2*(t/0.2))
+            return comp([(head,bx-w,bh),(upper,bx-w,bu),(lower,bx,bl),(feet,bx,bf)])
+        elif t < 0.5:
+            p = (t-0.2)/0.3
+            lg = int(u*5*p)
+            return comp([(head,bx+lg-u*2,bh),(upper,bx+lg,bu),(lower,bx+lg//2,bl),(feet,bx,bf)])
+        else:
+            p  = (t-0.5)/0.5
+            lg = int(u*5*(1-p))
+            return comp([(head,bx+lg-u,bh),(upper,bx+lg,bu),(lower,bx+lg//3,bl),(feet,bx,bf)])
+
     elif anim == "hurt":
-        ox -= int(u * 3 * (1 - t))
-        canvas.paste(base, (ox, oy), base)
+        kb = int(u*4*(1-t))
+        c  = Image.new("RGBA",(W,H),(0,0,0,0))
+        for img,x,y in [(head,bx-kb,bh),(upper,bx-kb,bu),(lower,bx-kb,bl),(feet,bx-kb,bf)]:
+            _paste(c,img,x,y)
         if t < 0.5:
-            alpha = int(160 * (1 - t * 2))
-            red   = Image.new("RGBA", canvas.size, (255, 50, 50, alpha))
-            canvas = Image.alpha_composite(canvas, red)
-        return canvas.crop((pad, pad, pad+sz, pad+sz))
+            red = Image.new("RGBA",(W,H),(255,50,50,int(180*(1-t*2))))
+            c   = Image.alpha_composite(c,red)
+        return c.crop((pad,pad,pad+sz,pad+sz))
+
     elif anim == "die":
-        ox += int(t * sz * 0.35)
-        oy += int(t * sz * 0.25)
-        canvas.paste(base, (ox, oy), base)
-        alpha = max(0, int(255 * (1 - t * 1.2)))
-        r2,g2,b2,a2 = canvas.split()
-        a2 = a2.point(lambda p: int(p * alpha / 255))
-        canvas = Image.merge("RGBA",(r2,g2,b2,a2))
-        return canvas.crop((pad, pad, pad+sz, pad+sz))
+        fx,fy = int(t*sz*.4), int(t*sz*.3)
+        al    = max(0,int(255*(1-t*1.3)))
+        c     = Image.new("RGBA",(W,H),(0,0,0,0))
+        for img,x,y in [(head,bx+fx,bh+fy),(upper,bx+fx,bu+fy),(lower,bx+fx+fx//3,bl+fy*2),(feet,bx+fx+fx//2,bf+fy*3)]:
+            _paste(c,img,x,y)
+        r2,g2,b2,a2 = c.split()
+        a2 = a2.point(lambda p: int(p*al/255))
+        return Image.merge("RGBA",(r2,g2,b2,a2)).crop((pad,pad,pad+sz,pad+sz))
 
-    canvas.paste(base, (ox, oy), base)
-    return canvas.crop((pad, pad, pad+sz, pad+sz))
-
+    return comp([(base,bx,pad)])
 
 def run_generation(char_data, animations, sprite_size, fps, result_store):
     """
