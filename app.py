@@ -214,104 +214,255 @@ def hex_to_rgba(hex_str, alpha=255):
     except: return (100, 100, 200, alpha)
 
 def make_placeholder(size, primary, secondary, living_type="Human"):
-    """Draw a pixel art placeholder matching the character's colors and type."""
-    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    d   = ImageDraw.Draw(img)
-    s   = size
-    cx  = s // 2
-
+    """Draw a detailed RPG-style pixel art character — no blobs, proper anatomy."""
+    # Work at 4x then downscale for crisp pixels
+    scale  = 4
+    w      = size * scale
+    img    = Image.new("RGBA", (w, w), (0, 0, 0, 0))
+    d      = ImageDraw.Draw(img)
+    cx     = w // 2
+    p      = primary
+    s2     = secondary
+    skin   = (255, 220, 177, 255)
+    dark   = tuple(max(0, c - 60) for c in p[:3]) + (255,)
+    dark2  = tuple(max(0, c - 40) for c in s2[:3]) + (255,)
+    shadow = (20, 20, 30, 180)
+    white  = (255, 255, 255, 255)
+    black  = (0, 0, 0, 255)
+    
+    # ── proportions (all in 4x space) ──
+    u      = w // 16   # base unit
+    
+    head_w = u * 4
+    head_h = u * 4
+    head_x = cx - head_w // 2
+    head_y = u * 1
+    
+    body_w = u * 4
+    body_h = u * 5
+    body_x = cx - body_w // 2
+    body_y = head_y + head_h + u // 2
+    
+    leg_w  = u * 2 - u // 4
+    leg_h  = u * 5
+    leg_y  = body_y + body_h
+    
+    arm_w  = u * 2
+    arm_h  = u * 4
+    arm_y  = body_y
+    
+    foot_w = u * 2
+    foot_h = u
+    
     if living_type == "Animal":
-        # Round body beast
-        bw = max(4, s // 3)
-        bh = max(4, s // 4)
-        by = s // 3
-        d.ellipse([cx - bw, by, cx + bw, by + bh * 2], fill=primary)
-        # Head
-        hw = max(3, s // 5)
-        d.ellipse([cx - hw, by - hw, cx + hw, by + hw], fill=primary)
-        # Ears
-        d.rectangle([cx - hw, by - hw - max(2, s//8), cx - hw//2, by - hw], fill=secondary)
-        d.rectangle([cx + hw//2, by - hw - max(2, s//8), cx + hw, by - hw], fill=secondary)
+        # Beast character — stocky body, animal head
+        # Body (furry, wider)
+        d.rectangle([cx - body_w//2 - u, body_y, cx + body_w//2 + u, body_y + body_h], fill=p)
+        d.rectangle([cx - body_w//2 - u + u//2, body_y + u//2,
+                     cx + body_w//2 + u - u//2, body_y + body_h - u//2], fill=dark)
+        # Head (round)
+        d.ellipse([head_x - u//2, head_y, head_x + head_w + u//2, head_y + head_h + u//2], fill=p)
+        # Snout
+        d.ellipse([cx - u, head_y + head_h//2, cx + u, head_y + head_h + u//2], fill=s2)
+        # Ears (pointed)
+        d.polygon([(head_x, head_y + u//2), (head_x - u, head_y - u*2), (head_x + u, head_y)], fill=p)
+        d.polygon([(head_x + head_w, head_y + u//2), (head_x + head_w + u, head_y - u*2), (head_x + head_w - u, head_y)], fill=p)
         # Eyes
-        ey = by - hw//3
-        d.rectangle([cx - hw//2, ey, cx - hw//4, ey + max(1,s//16)], fill=(0,0,0,255))
-        d.rectangle([cx + hw//4, ey, cx + hw//2, ey + max(1,s//16)], fill=(0,0,0,255))
-        # Tail
-        d.rectangle([cx + bw - max(1,s//8), by + bh, cx + bw + max(2,s//6), by + bh * 2], fill=secondary)
+        d.rectangle([cx - u*2, head_y + u, cx - u, head_y + u*2], fill=s2)
+        d.rectangle([cx + u, head_y + u, cx + u*2, head_y + u*2], fill=s2)
+        d.rectangle([cx - u*2 + u//2, head_y + u + u//4, cx - u - u//4, head_y + u*2 - u//4], fill=black)
+        d.rectangle([cx + u + u//4, head_y + u + u//4, cx + u*2 - u//2, head_y + u*2 - u//4], fill=black)
         # Legs
-        lh = max(3, s // 5)
-        d.rectangle([cx - bw//2 - max(1,s//8), by + bh * 2, cx - max(1,s//8), by + bh * 2 + lh], fill=primary)
-        d.rectangle([cx + max(1,s//8), by + bh * 2, cx + bw//2 + max(1,s//8), by + bh * 2 + lh], fill=primary)
+        d.rectangle([cx - body_w//2 - u, leg_y, cx - u//2, leg_y + leg_h - u], fill=p)
+        d.rectangle([cx + u//2, leg_y, cx + body_w//2 + u, leg_y + leg_h - u], fill=p)
+        # Paws
+        d.ellipse([cx - body_w//2 - u - u//2, leg_y + leg_h - u*2, cx, leg_y + leg_h], fill=dark)
+        d.ellipse([cx, leg_y + leg_h - u*2, cx + body_w//2 + u + u//2, leg_y + leg_h], fill=dark)
+        # Tail
+        d.arc([cx + body_w//2, body_y - u, cx + body_w//2 + u*4, body_y + u*4], 0, 200, fill=s2, width=u)
 
     elif living_type == "Other":
-        # Blobby monster
-        bw = max(4, s // 3)
-        bh = max(5, s // 2)
-        by = s // 4
-        d.ellipse([cx - bw, by, cx + bw, by + bh], fill=primary)
-        # Spikes / horns
-        for ox in [-bw//2, 0, bw//2]:
-            d.polygon([
-                (cx + ox, by - max(3, s//6)),
-                (cx + ox - max(2, s//8), by),
-                (cx + ox + max(2, s//8), by),
-            ], fill=secondary)
-        # Eyes (glowing)
-        ey = by + bh // 3
-        ew = max(2, s // 8)
-        d.ellipse([cx - ew*2, ey, cx - ew, ey + ew], fill=secondary)
-        d.ellipse([cx + ew, ey, cx + ew*2, ey + ew], fill=secondary)
-        # Mouth
-        my = by + bh * 2 // 3
-        d.rectangle([cx - ew*2, my, cx + ew*2, my + max(1, s//12)], fill=(0,0,0,255))
-        # Tentacle legs
-        for ox in [-bw//2, 0, bw//2]:
-            d.rectangle([cx + ox - max(1,s//16), by + bh, cx + ox + max(1,s//16), by + bh + max(3,s//5)], fill=primary)
+        # Monster/Mystical — asymmetric, otherworldly
+        # Wide body
+        d.rectangle([cx - body_w - u, body_y, cx + body_w + u, body_y + body_h + u], fill=p)
+        # Body shading
+        d.rectangle([cx - body_w - u + u//2, body_y + u//2,
+                     cx + body_w + u - u//2, body_y + body_h + u - u//2], fill=dark)
+        # Big horned head
+        d.rectangle([head_x - u//2, head_y, head_x + head_w + u//2, head_y + head_h], fill=p)
+        # Horns
+        d.polygon([(cx - u*2, head_y), (cx - u*3, head_y - u*3), (cx - u, head_y)], fill=s2)
+        d.polygon([(cx + u*2, head_y), (cx + u*3, head_y - u*3), (cx + u, head_y)], fill=s2)
+        # Glowing eyes
+        d.rectangle([cx - u*2, head_y + u, cx - u//2, head_y + u*2], fill=s2)
+        d.rectangle([cx + u//2, head_y + u, cx + u*2, head_y + u*2], fill=s2)
+        d.rectangle([cx - u*2 + u//4, head_y + u + u//4, cx - u//2 - u//4, head_y + u*2 - u//4], fill=white)
+        d.rectangle([cx + u//2 + u//4, head_y + u + u//4, cx + u*2 - u//4, head_y + u*2 - u//4], fill=white)
+        # Fang mouth
+        for fx in [cx - u, cx, cx + u//2]:
+            d.rectangle([fx, head_y + head_h - u//2, fx + u//2, head_y + head_h + u//2], fill=white)
+        # Clawed arms
+        d.rectangle([cx - body_w - u - arm_w, arm_y, cx - body_w - u, arm_y + arm_h], fill=dark)
+        d.rectangle([cx + body_w + u, arm_y, cx + body_w + u + arm_w, arm_y + arm_h], fill=dark)
+        # Claws
+        for ci2 in range(3):
+            ox = (ci2 - 1) * (u // 2)
+            d.rectangle([cx - body_w - u - arm_w//2 + ox - u//4, arm_y + arm_h,
+                          cx - body_w - u - arm_w//2 + ox + u//4, arm_y + arm_h + u], fill=s2)
+            d.rectangle([cx + body_w + u + arm_w//2 + ox - u//4, arm_y + arm_h,
+                          cx + body_w + u + arm_w//2 + ox + u//4, arm_y + arm_h + u], fill=s2)
+        # Stubby legs
+        d.rectangle([cx - body_w, leg_y, cx - u//2, leg_y + leg_h//2], fill=p)
+        d.rectangle([cx + u//2, leg_y, cx + body_w, leg_y + leg_h//2], fill=p)
+        # Aura glow effect
+        for r_off in range(3, 0, -1):
+            alpha = 40 + r_off * 20
+            glow = tuple(p[:3]) + (alpha,)
+            d.ellipse([cx - body_w - u - r_off*u*2, head_y - r_off*u*2,
+                       cx + body_w + u + r_off*u*2, leg_y + leg_h//2 + r_off*u*2], outline=glow, width=u//2)
 
     else:
-        # Humanoid (default)
-        head_s = max(4, s // 5)
-        body_h = max(5, s // 3)
-        leg_h  = max(3, s // 4)
-        top    = s // 10
-        # Head
-        d.rectangle([cx - head_s//2, top, cx + head_s//2, top + head_s], fill=primary)
-        # Body
-        bt = top + head_s + 1
-        d.rectangle([cx - head_s//2 - 1, bt, cx + head_s//2 + 1, bt + body_h], fill=secondary)
-        # Arms
-        d.rectangle([cx - head_s - max(1,s//8), bt, cx - head_s//2 - 1, bt + body_h - max(2,s//8)], fill=primary)
-        d.rectangle([cx + head_s//2 + 1, bt, cx + head_s + max(1,s//8), bt + body_h - max(2,s//8)], fill=primary)
-        # Legs
-        lt = bt + body_h + 1
-        d.rectangle([cx - head_s//2, lt, cx - 1, lt + leg_h], fill=secondary)
-        d.rectangle([cx + 1, lt, cx + head_s//2, lt + leg_h], fill=primary)
-        # Eyes
-        ey  = top + head_s // 3
-        ec  = (0, 0, 0, 255)
-        epx = max(1, s // 20)
-        d.rectangle([cx - head_s//3, ey, cx - head_s//3 + epx, ey + epx], fill=ec)
-        d.rectangle([cx + head_s//3 - epx, ey, cx + head_s//3, ey + epx], fill=ec)
+        # Humanoid — proper RPG hero proportions
+        # ── Shadow ──
+        d.ellipse([cx - u*3, leg_y + leg_h, cx + u*3, leg_y + leg_h + u], fill=shadow)
 
-    return img
+        # ── Boots ──
+        d.rectangle([cx - leg_w - u//4, leg_y + leg_h - foot_h, cx - u//4, leg_y + leg_h], fill=dark2)
+        d.rectangle([cx + u//4, leg_y + leg_h - foot_h, cx + leg_w + u//4, leg_y + leg_h], fill=dark2)
+        # Boot highlight
+        d.rectangle([cx - leg_w, leg_y + leg_h - foot_h + u//4, cx - u//2, leg_y + leg_h - u//4], fill=s2)
 
-def hf_generate(prompt, size=512):
-    model = "nerijs/pixel-art-xl"
-    full  = f"pixel art sprite, {prompt}, {size}x{size}, game asset, crisp pixels, no blur, transparent background"
+        # ── Legs / Pants ──
+        d.rectangle([cx - leg_w - u//4, leg_y, cx - u//4, leg_y + leg_h - foot_h], fill=dark2)
+        d.rectangle([cx + u//4, leg_y, cx + leg_w + u//4, leg_y + leg_h - foot_h], fill=dark2)
+        # Pants highlight stripe
+        d.rectangle([cx - leg_w + u//4, leg_y + u//4, cx - u//2, leg_y + u], fill=s2)
+
+        # ── Belt ──
+        d.rectangle([body_x, body_y + body_h - u, body_x + body_w, body_y + body_h], fill=dark)
+        d.rectangle([cx - u//2, body_y + body_h - u, cx + u//2, body_y + body_h], fill=s2)  # buckle
+
+        # ── Body / Torso ──
+        d.rectangle([body_x, body_y, body_x + body_w, body_y + body_h - u], fill=p)
+        # Chest armor panel
+        d.rectangle([body_x + u//2, body_y + u//2, body_x + body_w - u//2, body_y + body_h//2], fill=dark)
+        # Collar
+        d.rectangle([cx - u, body_y, cx + u, body_y + u], fill=skin)
+
+        # ── Arms ──
+        # Left arm
+        d.rectangle([body_x - arm_w, arm_y, body_x, arm_y + arm_h], fill=p)
+        d.rectangle([body_x - arm_w + u//4, arm_y + u//4, body_x - u//4, arm_y + u], fill=dark)
+        # Right arm (weapon hand — slightly forward)
+        d.rectangle([body_x + body_w, arm_y, body_x + body_w + arm_w, arm_y + arm_h], fill=p)
+        d.rectangle([body_x + body_w + u//4, arm_y + u//4, body_x + body_w + arm_w - u//4, arm_y + u], fill=dark)
+        # Gloves/hands
+        d.rectangle([body_x - arm_w + u//4, arm_y + arm_h, body_x - u//4, arm_y + arm_h + u], fill=skin)
+        d.rectangle([body_x + body_w + u//4, arm_y + arm_h, body_x + body_w + arm_w - u//4, arm_y + arm_h + u], fill=skin)
+
+        # ── Weapon (sword) ──
+        sword_x = body_x + body_w + arm_w + u//4
+        sword_y = arm_y + arm_h
+        d.rectangle([sword_x, sword_y - arm_h, sword_x + u//2, sword_y + u*2], fill=(200, 200, 220, 255))  # blade
+        d.rectangle([sword_x - u//2, sword_y - u//2, sword_x + u, sword_y + u//4], fill=s2)  # crossguard
+        d.rectangle([sword_x + u//8, sword_y, sword_x + u//2 - u//8, sword_y + u*2], fill=dark2)  # grip
+
+        # ── Neck ──
+        d.rectangle([cx - u, head_y + head_h - u//2, cx + u, head_y + head_h + u//2], fill=skin)
+
+        # ── Head ──
+        d.rectangle([head_x, head_y, head_x + head_w, head_y + head_h], fill=skin)
+        # Helmet / hair
+        d.rectangle([head_x - u//4, head_y, head_x + head_w + u//4, head_y + head_h//2], fill=s2)
+        # Helmet visor line
+        d.rectangle([head_x, head_y + head_h//2 - u//4, head_x + head_w, head_y + head_h//2], fill=dark)
+        # Face — eyes
+        d.rectangle([cx - u*2 + u//4, head_y + head_h//2 + u//4, cx - u + u//4, head_y + head_h//2 + u], fill=white)
+        d.rectangle([cx + u - u//4, head_y + head_h//2 + u//4, cx + u*2 - u//4, head_y + head_h//2 + u], fill=white)
+        d.rectangle([cx - u*2 + u//2, head_y + head_h//2 + u//2, cx - u, head_y + head_h//2 + u], fill=(80, 40, 20, 255))  # iris L
+        d.rectangle([cx + u, head_y + head_h//2 + u//2, cx + u*2 - u//2, head_y + head_h//2 + u], fill=(80, 40, 20, 255))  # iris R
+        # Mouth
+        d.rectangle([cx - u//2, head_y + head_h - u, cx + u//2, head_y + head_h - u//2], fill=(180, 100, 80, 255))
+        # Hair strands peeking out
+        d.rectangle([head_x, head_y + head_h - u//2, head_x + u//2, head_y + head_h + u//4], fill=s2)
+        d.rectangle([head_x + head_w - u//2, head_y + head_h - u//2, head_x + head_w, head_y + head_h + u//4], fill=s2)
+
+    # ── Outline pass (1px dark border around non-transparent pixels) ──
+    outline_img = Image.new("RGBA", (w, w), (0, 0, 0, 0))
+    od = ImageDraw.Draw(outline_img)
+    # Simple 1-pixel outline by drawing shifted copies
+    for ox2, oy2 in [(-u//4,0),(u//4,0),(0,-u//4),(0,u//4)]:
+        pix = img.getdata()
+        shifted = Image.new("RGBA", (w, w), (0, 0, 0, 0))
+        shifted.paste(img, (ox2, oy2))
+        # Composite dark outline under the main image
+        outline_img = Image.alpha_composite(outline_img, shifted)
+    # Tint outline dark
+    dark_layer = Image.new("RGBA", (w, w), (10, 10, 20, 255))
+    mask = outline_img.split()[3]
+    final = Image.composite(dark_layer, Image.new("RGBA", (w,w), (0,0,0,0)), mask)
+    result = Image.alpha_composite(final, img)
+
+    # Downscale to target size with NEAREST for pixel-crisp look
+    return result.resize((size, size), Image.NEAREST)
+def hf_generate(prompt, size=64):
+    """Try multiple HF models in order until one works."""
+    models = [
+        ("black-forest-labs/FLUX.1-schnell", {"num_inference_steps": 4}),
+        ("stabilityai/stable-diffusion-xl-base-1.0", {}),
+        ("runwayml/stable-diffusion-v1-5", {}),
+    ]
+    pixel_prompt = (
+        f"pixel art, 16-bit RPG sprite, side view, full body character, "
+        f"{prompt}, "
+        f"SNES style, classic RPG, clean outlines, flat colors, "
+        f"Final Fantasy 6 style, Chrono Trigger style, "
+        f"white background, centered, no background clutter"
+    )
+    neg = "blurry, 3d, realistic, photo, modern, deformed, extra limbs, bad anatomy, low quality"
     headers = {"Authorization": f"Bearer {HF_KEY}"} if HF_KEY else {}
-    try:
-        r = requests.post(
-            f"https://api-inference.huggingface.co/models/{model}",
-            headers=headers,
-            json={"inputs": full, "parameters": {"width": min(size*2,512), "height": min(size*2,512)}},
-            timeout=60,
-        )
-        if r.status_code == 200 and "image" in r.headers.get("content-type",""):
-            img = Image.open(io.BytesIO(r.content)).convert("RGBA")
-            return img.resize((size, size), Image.NEAREST)
-    except:
-        pass
+
+    for model, extra_params in models:
+        try:
+            payload = {
+                "inputs": pixel_prompt,
+                "parameters": {
+                    "width": 512, "height": 512,
+                    "negative_prompt": neg,
+                    **extra_params
+                }
+            }
+            r = requests.post(
+                f"https://api-inference.huggingface.co/models/{model}",
+                headers=headers,
+                json=payload,
+                timeout=60,
+            )
+            if r.status_code == 200 and "image" in r.headers.get("content-type", ""):
+                img = Image.open(io.BytesIO(r.content)).convert("RGBA")
+                # Remove white/near-white background
+                img = remove_white_bg(img)
+                # Pixelate to target size then scale back for crisp look
+                small = img.resize((size, size), Image.LANCZOS)
+                return small
+            elif r.status_code == 503:
+                continue  # model loading, try next
+        except:
+            continue
     return None
+
+def remove_white_bg(img: Image.Image, threshold=240) -> Image.Image:
+    """Make white/near-white pixels transparent."""
+    img = img.convert("RGBA")
+    data = img.getdata()
+    new_data = []
+    for r, g, b, a in data:
+        if r > threshold and g > threshold and b > threshold:
+            new_data.append((r, g, b, 0))
+        else:
+            new_data.append((r, g, b, a))
+    img.putdata(new_data)
+    return img
 
 def build_spritesheet(base_img, animations, fps=8):
     sz     = base_img.width
@@ -504,14 +655,12 @@ with left:
 
     st.write("")
 
-    if not GROQ_KEY:
-        st.warning("Add GROQ_API_KEY to .streamlit/secrets.toml")
-        if not HF_KEY:
-            st.caption("Add HF_API_KEY for real images (optional — placeholders work without it)")
-
-    can_go = bool(st.session_state.living_type and sel_anims and GROQ_KEY)
+    can_go = bool(st.session_state.living_type and sel_anims)
 
     if st.button("⚡ FORGE CHARACTER", use_container_width=True, type="primary", disabled=not can_go):
+        if not GROQ_KEY:
+            st.error("GROQ_API_KEY missing — add it in Streamlit Cloud → Settings → Secrets")
+            st.stop()
         lt   = st.session_state.living_type
         mode = st.session_state.mode
 
@@ -570,12 +719,10 @@ Return ONLY valid JSON, no markdown:
 
             if mode == "full":
                 st.write(f"🎨 Generating sprite ({sprite_size}px)...")
-                img = hf_generate(data.get("image_prompt","pixel art character"), size=gen_size)
+                img = hf_generate(data.get("image_prompt","pixel art RPG character"), size=sprite_size)
                 if img is None:
-                    st.write("⚠️ HF unavailable — using pixel placeholder (add HF_API_KEY for real images)")
+                    st.write("⚠️ HF unavailable — using RPG pixel placeholder")
                     img = make_placeholder(sprite_size, p1, p2, lt)
-                else:
-                    img = img.resize((sprite_size, sprite_size), Image.NEAREST)
                 imgs["full"] = img
 
             else:  # modular
