@@ -391,71 +391,124 @@ func play(anim: String) -> void:
 '''
 
 # ── Background generation thread ──────────────────────────────────────────────
+def _anim_frame(base: Image.Image, anim: str, frame_idx: int, total: int) -> Image.Image:
+    """Move whole sprite cleanly per animation frame — no cuts, no tears."""
+    sz    = base.width
+    t     = frame_idx / max(total - 1, 1)
+    u     = max(1, sz // 20)
+    sin_t = math.sin(t * math.pi * 2)
+    pad   = sz // 5
+    canvas = Image.new("RGBA", (sz + pad*2, sz + pad*2), (0,0,0,0))
+    ox, oy = pad, pad
+
+    if anim == "idle":
+        oy += int(math.sin(t * math.pi * 2) * max(1, u // 2))
+    elif anim == "walk":
+        oy -= int(abs(sin_t) * u * 1.5)
+        ox += int(sin_t * max(1, u // 2))
+    elif anim == "run":
+        oy -= int(abs(sin_t) * u * 3)
+        ox += int(sin_t * u)
+    elif anim == "jump":
+        if t < 0.15:
+            oy += int(u * 1.5 * (t / 0.15))
+        elif t < 0.55:
+            oy -= int(u * 7 * math.sin((t - 0.15) / 0.4 * math.pi))
+        elif t < 0.75:
+            oy -= int(u * 3 * (1 - (t - 0.55) / 0.2))
+    elif anim == "attack":
+        if t < 0.25:
+            ox -= int(u * 1.5 * (t / 0.25))
+        elif t < 0.55:
+            ox += int(u * 4 * ((t - 0.25) / 0.3))
+        else:
+            ox += int(u * 4 * (1 - (t - 0.55) / 0.45))
+    elif anim == "hurt":
+        ox -= int(u * 3 * (1 - t))
+        canvas.paste(base, (ox, oy), base)
+        if t < 0.5:
+            alpha = int(160 * (1 - t * 2))
+            red   = Image.new("RGBA", canvas.size, (255, 50, 50, alpha))
+            canvas = Image.alpha_composite(canvas, red)
+        return canvas.crop((pad, pad, pad+sz, pad+sz))
+    elif anim == "die":
+        ox += int(t * sz * 0.35)
+        oy += int(t * sz * 0.25)
+        canvas.paste(base, (ox, oy), base)
+        alpha = max(0, int(255 * (1 - t * 1.2)))
+        r2,g2,b2,a2 = canvas.split()
+        a2 = a2.point(lambda p: int(p * alpha / 255))
+        canvas = Image.merge("RGBA",(r2,g2,b2,a2))
+        return canvas.crop((pad, pad, pad+sz, pad+sz))
+
+    canvas.paste(base, (ox, oy), base)
+    return canvas.crop((pad, pad, pad+sz, pad+sz))
+
+
 def run_generation(char_data, animations, sprite_size, fps, result_store):
     """
-    Runs in a background thread — generates all frames, stores result.
-    Uses Pollinations for each unique pose frame.
+    Background thread:
+    1. Fetch ONE clean AI character image
+    2. Use it consistently across all animation rows
+    3. Apply smooth motion offsets per frame per animation
+    This gives consistent character appearance + proper animation feel.
     """
-    sz         = sprite_size
-    n_frames   = 4
-    species    = char_data.get("species","")
-    outfit     = char_data.get("outfit","")
-    palette    = char_data.get("color_palette","")
-    art_style  = char_data.get("art_style","pixel art 16-bit RPG")
-    lt         = char_data.get("living_type","Human")
-    p1         = hex_to_rgba(char_data.get("color_primary","#7c3aed"))
-    p2         = hex_to_rgba(char_data.get("color_secondary","#ff6b35"))
-    base_seed  = abs(hash(char_data.get("character_name","char"))) % 100000
-
-    char_desc = (
-        f"{art_style}, {species} character, {outfit}, {palette}, "
-        f"side view full body, SNES Chrono Trigger Final Fantasy 6 style, "
-        f"black pixel outlines, flat cel shading, limited color palette, "
-        f"plain white background, isolated character only, no scenery no ground"
-    )
+    sz        = sprite_size
+    n_frames  = 8
+    lt        = char_data.get("living_type","Human")
+    p1        = hex_to_rgba(char_data.get("color_primary","#7c3aed"))
+    p2        = hex_to_rgba(char_data.get("color_secondary","#ff6b35"))
+    base_seed = abs(hash(char_data.get("character_name","char"))) % 100000
+    log       = result_store["log"]
 
     sheet = Image.new("RGBA",(sz*n_frames, sz*len(animations)),(0,0,0,0))
     atlas = {"frames":{},"meta":{"size":{"w":sz*n_frames,"h":sz*len(animations)}}}
-    log   = result_store["log"]
 
+    # ── Step 1: Generate ONE base image ──────────────────────────────────────
+    log.append("🎨 Generating character base image...")
+    species  = char_data.get("species","")
+    outfit   = char_data.get("outfit","")
+    palette  = char_data.get("color_palette","")
+    art_style= char_data.get("art_style","pixel art 16-bit RPG")
+
+    prompt = (
+        f"{art_style}, {species} character, {outfit}, {palette}, "
+        f"side view full body standing pose, neutral idle stance, "
+        f"SNES Chrono Trigger Final Fantasy 6 style, "
+        f"black pixel outlines, flat cel shading, limited color palette, "
+        f"plain white background, isolated character, no scenery, no ground"
+    )
+
+    base_img = fetch_one(prompt, sz, seed=base_seed)
+    if base_img is None:
+        log.append("⚠️ AI image failed — using pixel placeholder")
+        base_img = make_placeholder(sz, p1, p2, lt)
+    else:
+        log.append("✅ Base character image ready!")
+
+    # ── Step 2: Build all animation frames from base image ────────────────────
     total = len(animations) * n_frames
     count = 0
-
     for ri, anim in enumerate(animations):
-        poses = FRAME_POSES.get(anim, FRAME_POSES["idle"])
+        log.append(f"🎬 Building {anim} animation ({ri+1}/{len(animations)})...")
         for ci in range(n_frames):
             count += 1
-            pose       = poses[ci % len(poses)]
-            frame_seed = base_seed + ri*17 + ci*3
-            prompt     = f"{char_desc}, {pose}"
-
-            log.append(f"🎨 {anim} {ci+1}/4  ({count}/{total})")
-
-            frame = fetch_one(prompt, sz, seed=frame_seed)
-            if frame is None:
-                log.append(f"⚠️  {anim} {ci+1} — placeholder used")
-                frame = make_placeholder(sz, p1, p2, lt)
-            else:
-                log.append(f"✅ {anim} {ci+1} — AI image ready")
-
+            frame = _anim_frame(base_img, anim, ci, n_frames)
             if frame.size != (sz,sz):
                 frame = frame.resize((sz,sz), Image.NEAREST)
-
             sheet.paste(frame,(ci*sz, ri*sz))
             atlas["frames"][f"{anim}_{ci:02d}"] = {
                 "frame":{"x":ci*sz,"y":ri*sz,"w":sz,"h":sz},
                 "animation":anim,"frame_index":ci,
             }
+        log.append(f"✅ {anim} done ({n_frames} frames)")
 
-            # Delay between frames to avoid rate limits
-            if count < total:
-                time.sleep(2)
-
-    result_store["sheet"] = sheet
-    result_store["atlas"] = atlas
+    result_store["sheet"]   = sheet
+    result_store["atlas"]   = atlas
     result_store["preview"] = sheet.crop((0,0,sz,sz))
-    result_store["done"]  = True
-    log.append("🎉 All frames complete!")
+    result_store["done"]    = True
+    result_store["n_frames"]= n_frames
+    log.append("🎉 All animations complete!")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # LAYOUT
@@ -604,16 +657,15 @@ Return ONLY valid JSON, no markdown:
         prog_bar        = st.progress(0)
         total_frames    = len(sel_anims) * 4
 
-        st.info(f"⏳ Generating {total_frames} animation frames ({len(sel_anims)} animations × 4 poses). Takes 2-5 minutes.")
+        st.info("⏳ Fetching 1 AI image then building all animations. Takes ~30 seconds.")
 
-        frame_count = 0
         while not result_store["done"]:
-            time.sleep(2)
+            time.sleep(1.5)
             log = result_store["log"]
-            done_frames = sum(1 for l in log if "✅" in l or "⚠️" in l)
-            prog_bar.progress(min(done_frames / max(total_frames,1), 0.99))
+            done_steps = sum(1 for l in log if "✅" in l or "⚠️" in l)
+            prog_bar.progress(min(done_steps / max(len(sel_anims)+1, 1), 0.99))
             if log:
-                log_placeholder.markdown("\n\n".join(f"`{l}`" for l in log[-8:]))
+                log_placeholder.markdown("\n\n".join(f"`{l}`" for l in log[-6:]))
 
         prog_bar.progress(1.0)
         log_placeholder.markdown("\n\n".join(f"`{l}`" for l in result_store["log"][-5:]))
@@ -672,9 +724,10 @@ with right:
 
                 # Build animated preview from spritesheet frames
                 frames_b64 = {}
+                n_fr = sheet.width // sz
                 for ri,anim in enumerate(anims):
                     frames_b64[anim] = []
-                    for ci in range(4):
+                    for ci in range(n_fr):
                         x,y = ci*sz, ri*sz
                         frame = sheet.crop((x,y,x+sz,y+sz))
                         disp_sz = min(sz*5, 320)
