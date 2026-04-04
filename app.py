@@ -524,97 +524,82 @@ def remove_bg(img: Image.Image) -> Image.Image:
 
 def animate_frame(base_img, anim, frame_idx, total_frames):
     """
-    Generate an animation frame by compositing transformed copies of the sprite.
-    Instead of tearing pixels, we copy the whole sprite and offset/crop it
-    to simulate movement — clean with no glitching.
+    Create animation frames by moving the WHOLE sprite cleanly.
+    Never crops or slices the image — only translates and composites.
     """
     import math
-    sz  = base_img.width
-    t   = frame_idx / max(total_frames - 1, 1)   # 0.0 → 1.0
-    u   = max(1, sz // 32)                         # 1 motion unit
+    sz    = base_img.width
+    t     = frame_idx / max(total_frames - 1, 1)
+    u     = max(1, sz // 24)
     sin_t = math.sin(t * math.pi * 2)
+    cos_t = math.cos(t * math.pi * 2)
 
-    # Canvas slightly taller to allow movement without clipping
-    pad    = sz // 8
-    canvas = Image.new("RGBA", (sz, sz + pad * 2), (0, 0, 0, 0))
-
-    def paste_sprite(offset_x=0, offset_y=0):
-        canvas.paste(base_img, (offset_x, pad + offset_y), base_img)
+    # Extra padding so sprite can move without clipping
+    pad    = sz // 4
+    canvas = Image.new("RGBA", (sz + pad * 2, sz + pad * 2), (0, 0, 0, 0))
+    cx, cy = pad, pad  # default paste position
 
     if anim == "idle":
-        # Gentle breathing bob: 1-2px up/down
-        bob = int(math.sin(t * math.pi * 2) * u)
-        paste_sprite(offset_y=bob)
+        # Subtle breathe: 1px vertical bob
+        cy += int(math.sin(t * math.pi * 2) * u * 0.8)
 
     elif anim == "walk":
-        # Body bobs up on every other frame, slight x sway
-        bob   = abs(int(sin_t * u * 1.5))
-        sway  = int(sin_t * u)
-        paste_sprite(offset_x=sway, offset_y=-bob)
+        # Step bounce: body bobs up on each step
+        cy -= int(abs(sin_t) * u * 1.5)
+        cx += int(sin_t * u * 0.5)
 
     elif anim == "run":
-        # More aggressive bob and lean forward
-        bob  = abs(int(sin_t * u * 3))
-        lean = int(sin_t * u * 1.5)
-        paste_sprite(offset_x=lean, offset_y=-bob)
+        # Bigger, faster bounce
+        cy -= int(abs(sin_t) * u * 2.5)
+        cx += int(sin_t * u)
 
     elif anim == "jump":
-        # Arc: crouch → rise → peak → fall
+        # Arc trajectory
         if t < 0.15:
-            # Crouch: move down
-            paste_sprite(offset_y=int(u * 2 * (t / 0.15)))
-        elif t < 0.5:
-            # Rise: move up fast
-            rise = int(u * 8 * ((t - 0.15) / 0.35))
-            paste_sprite(offset_y=-rise)
-        elif t < 0.7:
-            # Peak: hold high
-            paste_sprite(offset_y=-int(u * 8))
-        else:
-            # Fall
-            fall = int(u * 8 * (1 - (t - 0.7) / 0.3))
-            paste_sprite(offset_y=-fall)
+            cy += int(u * 1.5 * (t / 0.15))          # crouch
+        elif t < 0.55:
+            rise = ((t - 0.15) / 0.4)
+            cy -= int(u * 7 * math.sin(rise * math.pi))  # rise
+        elif t < 0.75:
+            cy -= int(u * 3 * (1 - (t - 0.55) / 0.2))   # peak → fall
+        # else land (back at 0)
 
     elif anim == "attack":
-        # Lunge forward and back
-        if t < 0.3:
-            # Wind-up: pull back
-            paste_sprite(offset_x=-int(u * 2 * (t / 0.3)))
-        elif t < 0.6:
-            # Strike: lunge forward hard
-            lunge = int(u * 5 * ((t - 0.3) / 0.3))
-            paste_sprite(offset_x=lunge)
+        if t < 0.25:
+            cx -= int(u * 1.5 * (t / 0.25))   # wind-up: lean back
+        elif t < 0.55:
+            cx += int(u * 4 * ((t - 0.25) / 0.3))   # lunge forward
         else:
-            # Recover
-            lunge = int(u * 5 * (1 - (t - 0.6) / 0.4))
-            paste_sprite(offset_x=lunge)
+            cx += int(u * 4 * (1 - (t - 0.55) / 0.45))  # recover
 
     elif anim == "hurt":
-        # Knockback: jerk left, flash
-        knockback = -int(u * 4 * (1 - t))
-        paste_sprite(offset_x=knockback)
-        # Red flash overlay on first half
+        cx -= int(u * 3 * (1 - t))   # knockback left, recovers
+        # Red tint overlay
+        canvas.paste(base_img, (cx, cy), base_img)
         if t < 0.5:
-            alpha = int(150 * (1 - t * 2))
-            overlay = Image.new("RGBA", (sz, sz + pad * 2), (255, 50, 50, alpha))
-            canvas = Image.alpha_composite(canvas, overlay)
+            alpha = int(180 * (1 - t * 2))
+            red   = Image.new("RGBA", (sz, sz), (255, 60, 60, alpha))
+            tmp   = Image.new("RGBA", (sz + pad*2, sz + pad*2), (0,0,0,0))
+            tmp.paste(red, (cx, cy))
+            canvas = Image.alpha_composite(canvas, tmp)
+        # Crop and return early
+        return canvas.crop((pad, pad, pad + sz, pad + sz))
 
     elif anim == "die":
-        # Fall: slide down and fade out
-        fall  = int(t * sz * 0.4)
-        alpha = max(0, int(255 * (1 - t)))
-        paste_sprite(offset_y=fall)
-        # Fade
+        # Fall sideways + fade
+        cx  += int(t * sz * 0.35)
+        cy  += int(t * sz * 0.25)
+        alpha = max(0, int(255 * (1 - t * 1.2)))
+        canvas.paste(base_img, (cx, cy), base_img)
         r2, g2, b2, a2 = canvas.split()
         a2 = a2.point(lambda p: int(p * alpha / 255))
         canvas = Image.merge("RGBA", (r2, g2, b2, a2))
+        return canvas.crop((pad, pad, pad + sz, pad + sz))
 
-    else:
-        paste_sprite()
+    canvas.paste(base_img, (cx, cy), base_img)
+    return canvas.crop((pad, pad, pad + sz, pad + sz))
 
-    # Crop back to sz×sz, centered
-    cropped = canvas.crop((0, pad, sz, pad + sz))
-    return cropped
+
 def build_spritesheet(base_img, animations, fps=8):
     sz    = base_img.width
     cols  = fps
